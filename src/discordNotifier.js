@@ -43,7 +43,7 @@ function formatReason(reason) {
 	return reason.slice(0, 997) + '...'
 }
 
-async function sendOrderNotification({ action, symbol, size, entry, sl, tp, confidence, reason, trend_alignment, chartBuffers }) {
+async function sendOrderNotification({ action, symbol, size, entry, sl, tp, confidence, reason, trend_alignment, chartBuffers, paper }) {
 	if (!WEBHOOK_URL) {
 		console.warn('[Discord] ไม่มี DISCORD_WEBHOOK_URL — ข้ามการแจ้งเตือน')
 		return
@@ -53,9 +53,10 @@ async function sendOrderNotification({ action, symbol, size, entry, sl, tp, conf
 	const color = ACTION_COLOR[action] ?? 0x888888
 	const actionEmoji = action === 'BUY' ? '🟢 BUY' : '🔴 SELL'
 	const pct = (confidence * 100).toFixed(0)
+	const paperTag = paper ? '📝' : ''
 
 	const embed = {
-		title: `${symbolEmoji} ${symbolName} — ${actionEmoji}`,
+		title: `${paperTag}${symbolEmoji} ${symbolName} — ${actionEmoji}${paper ? ' (PAPER)' : ''}`,
 		color,
 		fields: [
 			{
@@ -158,6 +159,7 @@ async function sendCycleSummary(results, runCount) {
 		}
 
 		const outcome = r.reason ?? '-'
+		const paperTag = r.paper ? '📝 ' : ''
 		const analysis = r.aiAnalysis && r.aiAnalysis !== r.reason ? r.aiAnalysis : null
 
 		const lines = [`${statusIcon} confident ${pct}`]
@@ -165,7 +167,7 @@ async function sendCycleSummary(results, runCount) {
 		if (analysis) lines.push('', `🤔 ${formatReason(analysis)}`)
 
 		return {
-			title: `#${runCount} ${symbolEmoji} ${symbolName} — ${actionText}`,
+			title: `${paperTag}#${runCount} ${symbolEmoji} ${symbolName} — ${actionText}${r.paper ? ' (PAPER)' : ''}`,
 			color,
 			description: lines.join('\n'),
 			timestamp: new Date().toISOString(),

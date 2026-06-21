@@ -17,6 +17,7 @@ const SYMBOLS = (process.env.SYMBOLS ?? 'EURUSD').split(',')
 const ACCOUNT_BALANCE = parseFloat(process.env.ACCOUNT_BALANCE ?? '1000')
 const PRIMARY_TIMEFRAME = process.env.TIMEFRAME ?? 'MINUTE_15'
 const RUN_NUMBER = process.env.GITHUB_RUN_NUMBER ?? '1'
+const PAPER_TRADING = process.env.PAPER_TRADING === 'true'
 
 const TF_MAP = {
 	'MINUTE_1':  ['MINUTE_1',  'MINUTE_5',  'MINUTE_15'],
@@ -111,7 +112,7 @@ async function runAllCycles() {
 	for (const decision of decisions) {
 		const symbol = decision.symbol
 		const symbolData = allData.find(d => d.symbol === symbol)
-		const cycleReport = { ...decision, status: 'OK', symbol, aiAnalysis: decision.reason }
+		const cycleReport = { ...decision, status: 'OK', symbol, aiAnalysis: decision.reason, paper: PAPER_TRADING || undefined }
 
 		try {
 			const alreadyOpen = await hasOpenPosition(symbol)
@@ -137,9 +138,15 @@ async function runAllCycles() {
 				})
 
 				if (orderParams) {
-					const result = await placeOrder(orderParams)
+					let result
+					if (PAPER_TRADING) {
+						result = { dealReference: `paper-${Date.now()}-${symbol}` }
+						console.log(`[Bot] ${symbol} 📝 PAPER — จำลอง ${decision.action}`)
+					} else {
+						result = await placeOrder(orderParams)
+					}
 					if (result) {
-						console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ`)
+						console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ${PAPER_TRADING ? ' (PAPER)' : ''}`)
 						addTrade({
 							dealId: result.dealReference ?? null,
 							symbol,
@@ -151,6 +158,7 @@ async function runAllCycles() {
 							sl_pips: decision.sl_pips,
 							tp_pips: decision.tp_pips,
 							indicators: primaryIndicators,
+							paper: PAPER_TRADING || undefined,
 						})
 						await sendOrderNotification({
 							action: decision.action,
@@ -163,6 +171,7 @@ async function runAllCycles() {
 							reason: decision.reason,
 							trend_alignment: decision.trend_alignment,
 							chartBuffers: symbolData.charts,
+							paper: PAPER_TRADING,
 						})
 					} else {
 						cycleReport.status = 'ERROR'

@@ -57,3 +57,4 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ACCOUNT_BALANCE: ${{ secrets.ACCOUNT_BALANCE }}
           RISK_PERCENT: ${{ secrets.RISK_PERCENT }}
+          PAPER_TRADING: 'false'  # set to 'true' for paper trading (no real orders)

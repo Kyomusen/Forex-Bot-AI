@@ -1,0 +1,66 @@
+name: Forex Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Symbol to backtest'
+        default: 'EURUSD'
+        required: false
+      tf:
+        description: 'Timeframe (HOUR / MINUTE_15)'
+        default: 'HOUR'
+        required: false
+      candles:
+        description: 'Number of candles'
+        default: '720'
+        required: false
+      use_ai:
+        description: 'Use AI (rate-limited to 15rpm) or indicator rules'
+        default: 'false'
+        required: false
+      balance:
+        description: 'Initial balance'
+        default: '1000'
+        required: false
+      sl_pips:
+        description: 'Default SL pips (used when AI has no SL)'
+        default: '15'
+        required: false
+      tp_pips:
+        description: 'Default TP pips'
+        default: '30'
+        required: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run backtest
+        run: node src/backtest.js
+        env:
+          BACKTEST_SYMBOL: ${{ github.event.inputs.symbol }}
+          BACKTEST_TF: ${{ github.event.inputs.tf }}
+          BACKTEST_CANDLES: ${{ github.event.inputs.candles }}
+          BACKTEST_USE_AI: ${{ github.event.inputs.use_ai }}
+          BACKTEST_BALANCE: ${{ github.event.inputs.balance }}
+          BACKTEST_SL_PIPS: ${{ github.event.inputs.sl_pips }}
+          BACKTEST_TP_PIPS: ${{ github.event.inputs.tp_pips }}
+          CAPITAL_EMAIL: ${{ secrets.CAPITAL_EMAIL }}
+          CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
+          CAPITAL_API_KEY: ${{ secrets.CAPITAL_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

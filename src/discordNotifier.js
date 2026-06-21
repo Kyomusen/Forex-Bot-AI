@@ -189,23 +189,29 @@ async function sendBacktestReport(report) {
 	const color = report.netProfit >= 0 ? 0x00c896 : 0xff4466
 	const sign = report.netProfit >= 0 ? '+' : ''
 
+	const fields = [
+		{ name: '⏱ ระยะเวลา', value: `${report.candles} candles`, inline: true },
+		{ name: '🤖 ใช้ AI', value: report.aiCalls > 0 ? `${report.aiCalls} ครั้ง` : '❌ ไม่ใช้', inline: true },
+		{ name: '📈 เทรดทั้งหมด', value: String(report.totalTrades), inline: true },
+		{ name: '✅ ปิดแล้ว', value: `${report.closed} (WIN: ${report.wins} / LOSS: ${report.losses})`, inline: true },
+		{ name: '🎯 Win Rate', value: `**${report.winRate}%**`, inline: true },
+		{ name: 'Profit Factor', value: report.profitFactor, inline: true },
+		{ name: '💰 ยอดเริ่มต้น', value: `$${report.initialBalance.toFixed(2)}`, inline: true },
+		{ name: '💵 ยอดสุดท้าย', value: `$${report.finalBalance.toFixed(2)}`, inline: true },
+		{ name: '📊 กำไร/ขาดทุน', value: `**${sign}$${report.netProfit.toFixed(2)} (${sign}${report.returnPct}%)**`, inline: true },
+		{ name: '📉 Max Drawdown', value: `${report.maxDrawdown}%`, inline: true },
+		{ name: '🏆 Best Trade', value: `$${report.bestTrade.toFixed(2)}`, inline: true },
+		{ name: '💀 Worst Trade', value: `$${report.worstTrade.toFixed(2)}`, inline: true },
+	]
+
+	if (report.symbolSummaries) {
+		fields.unshift({ name: '📋 แยกตามสินทรัพย์', value: report.symbolSummaries, inline: false })
+	}
+
 	const embed = {
 		title: `📊 Backtest: ${report.symbol} ${report.tf}`,
 		color,
-		fields: [
-			{ name: '⏱ ระยะเวลา', value: `${report.candles} candles`, inline: true },
-			{ name: '🤖 ใช้ AI', value: report.aiCalls > 0 ? `${report.aiCalls} ครั้ง` : '❌ ไม่ใช้', inline: true },
-			{ name: '📈 เทรดทั้งหมด', value: String(report.totalTrades), inline: true },
-			{ name: '✅ ปิดแล้ว', value: `${report.closed} (WIN: ${report.wins} / LOSS: ${report.losses})`, inline: true },
-			{ name: '🎯 Win Rate', value: `**${report.winRate}%**`, inline: true },
-			{ name: 'Profit Factor', value: report.profitFactor, inline: true },
-			{ name: '💰 ยอดเริ่มต้น', value: `$${report.initialBalance.toFixed(2)}`, inline: true },
-			{ name: '💵 ยอดสุดท้าย', value: `$${report.finalBalance.toFixed(2)}`, inline: true },
-			{ name: '📊 กำไร/ขาดทุน', value: `**${sign}$${report.netProfit.toFixed(2)} (${sign}${report.returnPct}%)**`, inline: true },
-			{ name: '📉 Max Drawdown', value: `${report.maxDrawdown}%`, inline: true },
-			{ name: '🏆 Best Trade', value: `$${report.bestTrade.toFixed(2)}`, inline: true },
-			{ name: '💀 Worst Trade', value: `$${report.worstTrade.toFixed(2)}`, inline: true },
-		],
+		fields,
 		timestamp: new Date().toISOString(),
 		footer: { text: 'Forex Backtest' },
 	}

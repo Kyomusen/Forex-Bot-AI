@@ -3,9 +3,9 @@ name: Forex Backtest
 on:
   workflow_dispatch:
     inputs:
-      symbol:
-        description: 'Symbol to backtest'
-        default: 'EURUSD'
+      symbols:
+        description: 'Symbols (comma-separated)'
+        default: 'EURUSD,XAUUSD,GBPUSD,USDJPY,US30'
         required: false
       tf:
         description: 'Timeframe (HOUR / MINUTE_15)'
@@ -16,15 +16,15 @@ on:
         default: '720'
         required: false
       use_ai:
-        description: 'Use AI (rate-limited to 15rpm) or indicator rules'
+        description: 'Use AI (rate-limited) or indicator rules'
         default: 'false'
         required: false
-      balance:
-        description: 'Initial balance'
-        default: '1000'
+      balance_per_symbol:
+        description: 'Initial balance per symbol'
+        default: '200'
         required: false
       sl_pips:
-        description: 'Default SL pips (used when AI has no SL)'
+        description: 'Default SL pips'
         default: '15'
         required: false
       tp_pips:
@@ -35,7 +35,7 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
@@ -53,11 +53,11 @@ jobs:
       - name: Run backtest
         run: node src/backtest.js
         env:
-          BACKTEST_SYMBOL: ${{ github.event.inputs.symbol }}
+          BACKTEST_SYMBOLS: ${{ github.event.inputs.symbols }}
           BACKTEST_TF: ${{ github.event.inputs.tf }}
           BACKTEST_CANDLES: ${{ github.event.inputs.candles }}
           BACKTEST_USE_AI: ${{ github.event.inputs.use_ai }}
-          BACKTEST_BALANCE: ${{ github.event.inputs.balance }}
+          BACKTEST_BALANCE: ${{ github.event.inputs.balance_per_symbol }}
           BACKTEST_SL_PIPS: ${{ github.event.inputs.sl_pips }}
           BACKTEST_TP_PIPS: ${{ github.event.inputs.tp_pips }}
           CAPITAL_EMAIL: ${{ secrets.CAPITAL_EMAIL }}

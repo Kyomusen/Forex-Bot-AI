@@ -6,10 +6,10 @@ import { sendBacktestReport } from './discordNotifier.js'
 
 dotenv.config()
 
-const SYMBOL = process.env.BACKTEST_SYMBOL ?? 'EURUSD'
+const SYMBOLS = (process.env.BACKTEST_SYMBOLS ?? 'EURUSD,XAUUSD,GBPUSD,USDJPY,US30').split(',')
 const TF = process.env.BACKTEST_TF ?? 'HOUR'
 const CANDLE_COUNT = parseInt(process.env.BACKTEST_CANDLES ?? '720')
-const INITIAL_BALANCE = parseFloat(process.env.BACKTEST_BALANCE ?? '1000')
+const BALANCE_PER_SYMBOL = parseFloat(process.env.BACKTEST_BALANCE ?? '200')
 const USE_AI = process.env.BACKTEST_USE_AI === 'true'
 const RISK_PERCENT = parseFloat(process.env.BACKTEST_RISK ?? '1')
 const SL_PIPS_DEFAULT = parseInt(process.env.BACKTEST_SL_PIPS ?? '15')
@@ -34,17 +34,9 @@ function calcSize(balance, entry, slPips, symbol) {
 	return Math.max(0.01, parseFloat(lots.toFixed(2)))
 }
 
-function getPrice(candle) {
-	return candle.closePrice?.bid ?? candle.closePrice
-}
-
-function getHigh(candle) {
-	return candle.highPrice?.bid ?? candle.highPrice
-}
-
-function getLow(candle) {
-	return candle.lowPrice?.bid ?? candle.lowPrice
-}
+function getPrice(candle) { return candle.closePrice?.bid ?? candle.closePrice }
+function getHigh(candle) { return candle.highPrice?.bid ?? candle.highPrice }
+function getLow(candle) { return candle.lowPrice?.bid ?? candle.lowPrice }
 
 const aiCallTimestamps = []
 function canCallAI() {
@@ -60,17 +52,126 @@ function canCallAI() {
 function ruleDecision(indicators) {
 	const ind = Object.values(indicators)[0]
 	if (!ind) return { action: 'HOLD', confidence: 0, sl_pips: null, tp_pips: null, reason: 'no data' }
-
-	const { rsi, emaTrend, macd } = ind
+	const { rsi, emaTrend } = ind
 	if (rsi == null) return { action: 'HOLD', confidence: 0, sl_pips: null, tp_pips: null, reason: 'no RSI' }
 
-	if (rsi < 30 && emaTrend === 'bullish') {
+	if (rsi < 30 && emaTrend === 'bullish')
 		return { action: 'BUY', confidence: 0.6, sl_pips: SL_PIPS_DEFAULT, tp_pips: TP_PIPS_DEFAULT, reason: `RSI ${rsi.toFixed(1)} oversold + ${emaTrend}` }
-	}
-	if (rsi > 70 && emaTrend === 'bearish') {
+	if (rsi > 70 && emaTrend === 'bearish')
 		return { action: 'SELL', confidence: 0.6, sl_pips: SL_PIPS_DEFAULT, tp_pips: TP_PIPS_DEFAULT, reason: `RSI ${rsi.toFixed(1)} overbought + ${emaTrend}` }
-	}
 	return { action: 'HOLD', confidence: 0.3, sl_pips: null, tp_pips: null, reason: `RSI ${rsi.toFixed(1)} ${emaTrend}` }
+}
+
+async function runBacktest() {
+	const totalBalance = BALANCE_PER_SYMBOL * SYMBOLS.length
+	console.log(`\n[Backtest] ===== เริ่ม Backtest =====`)
+	console.log(`[Backtest] Symbols: ${SYMBOLS.join(', ')} | ${TF} | ${CANDLE_COUNT} candles`)
+	console.log(`[Backtest] Balance: $${BALANCE_PER_SYMBOL}/symbol (รวม $${totalBalance}) | AI: ${USE_AI}`)
+
+	await createSession()
+
+	const allCandles = {}
+	let minLen = Infinity
+	for (const sym of SYMBOLS) {
+		const raw = await getCandles(sym, TF, CANDLE_COUNT)
+		if (!raw || raw.length < 60) {
+			console.error(`[Backtest] ${sym}: candle ไม่เพียงพอ (${raw?.length ?? 0}) — ข้าม`)
+			continue
+		}
+		allCandles[sym] = raw
+		if (raw.length < minLen) minLen = raw.length
+		console.log(`[Backtest] ${sym}: โหลดมา ${raw.length} candles`)
+	}
+
+	const activeSymbols = Object.keys(allCandles)
+	if (activeSymbols.length === 0) { console.error('[Backtest] ไม่มี symbol ที่มีข้อมูลพอ'); return }
+
+	const balances = {}
+	const positions = {}
+	const trades = {}
+	let aiCallsUsed = 0
+	let peakTotal = totalBalance
+	let maxDD = 0
+
+	for (const sym of activeSymbols) {
+		balances[sym] = BALANCE_PER_SYMBOL
+		positions[sym] = null
+		trades[sym] = []
+	}
+
+	const startIdx = 60
+	for (let i = startIdx; i < minLen; i++) {
+		for (const sym of activeSymbols) {
+			const candles = allCandles[sym]
+			const current = candles[i]
+			const price = getPrice(current)
+			const pos = positions[sym]
+
+			if (pos) {
+				const result = checkSLTP(pos, candles, pos.entryIdx + 1, i + 1)
+				if (result) {
+					const multiplier = pos.type === 'BUY' ? 1 : -1
+					const pnlPips = (result.price - pos.entry) / pipToPrice(1, sym)
+					const pnl = pnlPips * pos.size * (pipToPrice(1, sym) * 100000) * multiplier
+					balances[sym] += pnl
+					trades[sym].push({ ...pos, exit: result.price, pnl: parseFloat(pnl.toFixed(2)), result: result.type === 'TP' ? 'WIN' : 'LOSS', exitTime: result.at, bars: i - pos.entryIdx })
+					positions[sym] = null
+					const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
+					if (currentTotal > peakTotal) peakTotal = currentTotal
+					const dd = ((peakTotal - currentTotal) / peakTotal) * 100
+					if (dd > maxDD) maxDD = dd
+					continue
+				}
+				if (i >= minLen - 1) {
+					trades[sym].push({ ...pos, exit: price, pnl: 0, result: 'UNKNOWN', exitTime: current.snapshotTime ?? i, bars: i - pos.entryIdx })
+					positions[sym] = null
+				}
+				continue
+			}
+
+			const window = candles.slice(0, i + 1)
+			const secondTf = TF === 'HOUR' ? 'HOUR_4' : 'MINUTE_15'
+			const candleMap = { [TF]: window }
+			const sw = candles.slice(Math.max(0, i - 95), i + 1)
+			if (sw.length >= 20) candleMap[secondTf] = sw
+			const indicators = getMultiTFIndicators(candleMap)
+
+			let decision
+			if (USE_AI && canCallAI()) {
+				try {
+					const aiDecisions = await getAIDecision([{ symbol: sym, indicators, charts: {} }], null, null)
+					decision = aiDecisions?.[0]
+					aiCallsUsed++
+				} catch (err) {
+					console.warn(`[Backtest] ${sym} AI error: ${err.message}`)
+					decision = ruleDecision(indicators)
+				}
+			} else {
+				decision = ruleDecision(indicators)
+			}
+
+			if (!decision || decision.action === 'HOLD') continue
+
+			const slPips = decision.sl_pips ?? SL_PIPS_DEFAULT
+			const tpPips = decision.tp_pips ?? TP_PIPS_DEFAULT
+			const size = calcSize(balances[sym], price, slPips, sym)
+			if (size <= 0) continue
+
+			const sl = decision.action === 'BUY' ? price - pipToPrice(slPips, sym) : price + pipToPrice(slPips, sym)
+			const tp = decision.action === 'BUY' ? price + pipToPrice(tpPips, sym) : price - pipToPrice(tpPips, sym)
+
+			positions[sym] = { symbol: sym, type: decision.action, entry: price, sl, tp, size, confidence: decision.confidence, reason: decision.reason, entryTime: current.snapshotTime ?? i, entryIdx: i }
+
+			if (trades[sym].length === 0 || trades[sym].length % 5 === 0) {
+				console.log(`[Backtest] ${sym} candle#${i} ${decision.action} @ ${price} | confidence: ${((decision.confidence ?? 0) * 100).toFixed(0)}%`)
+			}
+		}
+	}
+
+	const allTrades = Object.values(trades).flat()
+	const totalUsedBalance = Object.values(balances).reduce((a, b) => a + b, 0)
+	const totalPnl = totalUsedBalance - totalBalance
+	await printReport(trades, balances, totalBalance, totalUsedBalance, allTrades, aiCallsUsed, maxDD)
 }
 
 function checkSLTP(position, candles, startIdx, endIdx) {
@@ -80,7 +181,6 @@ function checkSLTP(position, candles, startIdx, endIdx) {
 		const high = getHigh(c)
 		const low = getLow(c)
 		const time = c.snapshotTime ?? c.snapshotTimeUTC ?? i
-
 		if (position.type === 'BUY') {
 			if (low <= position.sl) return { hit: true, price: position.sl, type: 'SL', at: time }
 			if (high >= position.tp) return { hit: true, price: position.tp, type: 'TP', at: time }
@@ -92,203 +192,90 @@ function checkSLTP(position, candles, startIdx, endIdx) {
 	return null
 }
 
-function calcWinRate(trades) {
-	if (trades.length === 0) return 0
-	return (trades.filter(t => t.result === 'WIN').length / trades.length * 100).toFixed(1)
-}
+async function printReport(tradesMap, balances, totalBalance, finalBalance, allTrades, aiCalls, maxDD) {
+	console.log(`\n${'='.repeat(60)}`)
+	console.log('📊 สรุป Backtest ทุกค่าเงิน')
+	console.log(`${'='.repeat(60)}`)
+	const h = (s, w) => s.padEnd(w)
+	const hr = (s, w) => s.padStart(w)
+	console.log(`${h('สินทรัพย์',12)} ${hr('Balance',10)} ${hr('PnL',10)} ${hr('เทรด',6)} ${hr('WIN',5)} ${hr('LOSS',5)} ${hr('WinRate',8)} ${hr('PF',6)}`)
+	console.log('-'.repeat(60))
 
-async function runBacktest() {
-	console.log(`\n[Backtest] ===== เริ่ม Backtest =====`)
-	console.log(`[Backtest] ${SYMBOL} | ${TF} | ${CANDLE_COUNT} candles | Balance: $${INITIAL_BALANCE} | AI: ${USE_AI}`)
+	let totalTrades = 0, totalClosed = 0, totalWins = 0, totalLosses = 0
+	let grossProfit = 0, grossLoss = 0
+	let allClosedTrades = []
 
-	await createSession()
-	const raw = await getCandles(SYMBOL, TF, CANDLE_COUNT)
-	if (!raw || raw.length < 60) {
-		console.error(`[Backtest] ข้อมูล candle ไม่เพียงพอ (${raw?.length ?? 0})`)
-		return
-	}
-	console.log(`[Backtest] โหลดมา ${raw.length} candles`)
+	for (const sym of Object.keys(tradesMap)) {
+		const trades = tradesMap[sym]
+		const initBal = BALANCE_PER_SYMBOL
+		const finalBal = balances[sym]
+		const pnl = finalBal - initBal
+		const closed = trades.filter(t => t.result !== 'UNKNOWN')
+		const wins = closed.filter(t => t.result === 'WIN')
+		const losses = closed.filter(t => t.result === 'LOSS')
+		const wr = closed.length > 0 ? (wins.length / closed.length * 100).toFixed(1) : 'N/A'
+		const gp = wins.reduce((s, t) => s + t.pnl, 0)
+		const gl = losses.reduce((s, t) => s + t.pnl, 0)
+		const pf = gl !== 0 ? (gp / Math.abs(gl)).toFixed(2) : (closed.length > 0 ? '∞' : '-')
 
-	const candles = raw
-	let balance = INITIAL_BALANCE
-	let position = null
-	const trades = []
-	let peakBalance = INITIAL_BALANCE
-	let maxDrawdown = 0
-	let aiCallsUsed = 0
+		totalTrades += trades.length
+		totalClosed += closed.length
+		totalWins += wins.length
+		totalLosses += losses.length
+		grossProfit += gp
+		grossLoss += Math.abs(gl)
+		allClosedTrades.push(...closed)
 
-	const startIdx = 60
-
-	for (let i = startIdx; i < candles.length; i++) {
-		const window = candles.slice(0, i + 1)
-		const current = candles[i]
-		const price = getPrice(current)
-
-		if (position) {
-			const result = checkSLTP(position, candles, position.entryIdx + 1, i + 1)
-			if (result) {
-				const multiplier = position.type === 'BUY' ? 1 : -1
-				const pnlPips = (result.price - position.entry) / pipToPrice(1, SYMBOL)
-				const pnl = pnlPips * position.size * (pipToPrice(1, SYMBOL) * 100000) * multiplier
-				balance += pnl
-
-				const resultType = result.type === 'TP' ? 'WIN' : 'LOSS'
-				trades.push({
-					type: position.type,
-					entry: position.entry,
-					exit: result.price,
-					pnl: parseFloat(pnl.toFixed(2)),
-					result: resultType,
-					reason: position.reason,
-					confidence: position.confidence,
-					entryTime: position.entryTime,
-					exitTime: result.at,
-					bars: i - position.entryIdx,
-				})
-
-				position = null
-
-				if (balance > peakBalance) peakBalance = balance
-				const dd = ((peakBalance - balance) / peakBalance) * 100
-				if (dd > maxDrawdown) maxDrawdown = dd
-
-				if (trades.length % 10 === 0) {
-					console.log(`[Backtest] ${trades.length} เทรดแล้ว | Balance: $${balance.toFixed(2)} | WinRate: ${calcWinRate(trades)}%`)
-				}
-
-				continue
-			}
-			if (i >= candles.length - 1) {
-				trades.push({
-					type: position.type,
-					entry: position.entry,
-					exit: price,
-					pnl: 0,
-					result: 'UNKNOWN',
-					reason: position.reason,
-					confidence: position.confidence,
-					entryTime: position.entryTime,
-					exitTime: current.snapshotTime ?? i,
-					bars: i - position.entryIdx,
-				})
-				position = null
-			}
-			continue
-		}
-
-		const candleMap = {}
-		const secondTf = TF === 'HOUR' ? 'HOUR_4' : 'MINUTE_15'
-		candleMap[TF] = window
-
-		try {
-			const secondWindow = candles.slice(Math.max(0, i - 95), i + 1)
-			if (secondWindow.length >= 20) candleMap[secondTf] = secondWindow
-		} catch (_) {}
-
-		const indicators = getMultiTFIndicators(candleMap)
-
-		let decision
-		if (USE_AI && canCallAI()) {
-			const allData = [{
-				symbol: SYMBOL,
-				indicators,
-				charts: {},
-			}]
-			try {
-				const aiDecisions = await getAIDecision(allData, null, null)
-				decision = aiDecisions?.[0]
-				aiCallsUsed++
-				if (aiCallsUsed % 5 === 0) console.log(`[Backtest] เรียก AI ไป ${aiCallsUsed} ครั้ง`)
-			} catch (err) {
-				console.warn(`[Backtest] AI error (ใช้กฎแทน): ${err.message}`)
-				decision = ruleDecision(indicators)
-			}
-		} else {
-			decision = ruleDecision(indicators)
-		}
-
-		if (!decision || decision.action === 'HOLD') continue
-
-		const slPips = decision.sl_pips ?? SL_PIPS_DEFAULT
-		const tpPips = decision.tp_pips ?? TP_PIPS_DEFAULT
-		const size = calcSize(balance, price, slPips, SYMBOL)
-
-		if (size <= 0) continue
-
-		const slOffset = pipToPrice(slPips, SYMBOL)
-		const tpOffset = pipToPrice(tpPips, SYMBOL)
-		const sl = decision.action === 'BUY' ? price - slOffset : price + slOffset
-		const tp = decision.action === 'BUY' ? price + tpOffset : price - tpOffset
-
-		position = {
-			type: decision.action,
-			entry: price,
-			sl,
-			tp,
-			size,
-			confidence: decision.confidence,
-			reason: decision.reason,
-			entryTime: current.snapshotTime ?? i,
-			entryIdx: i,
-		}
-
-		console.log(`[Backtest] candle#${i} ${decision.action} @ ${price} | SL: ${sl.toFixed(5)} TP: ${tp.toFixed(5)} | confidence: ${((decision.confidence ?? 0) * 100).toFixed(0)}%`)
+		console.log(`${sym.padEnd(12)} $${finalBal.toFixed(2).padStart(7)} ${(pnl >= 0 ? '+' : '') + pnl.toFixed(2).padStart(7)} ${String(trades.length).padStart(6)} ${wins.length.toString().padStart(5)} ${losses.length.toString().padStart(5)} ${String(wr).padStart(7)}% ${pf.toString().padStart(5)}`)
 	}
 
-	await printReport(trades, INITIAL_BALANCE, balance, maxDrawdown, aiCallsUsed, candles.length)
-}
+	const netPnl = finalBalance - totalBalance
+	const overallWR = totalClosed > 0 ? (totalWins / totalClosed * 100).toFixed(1) : 'N/A'
+	const overallPF = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : (totalClosed > 0 ? '∞' : '-')
 
-async function printReport(trades, initBalance, finalBalance, maxDrawdown, aiCalls, totalCandles) {
-	const totalTrades = trades.length
-	const closed = trades.filter(t => t.result !== 'UNKNOWN')
-	const wins = closed.filter(t => t.result === 'WIN')
-	const losses = closed.filter(t => t.result === 'LOSS')
-	const winRate = closed.length > 0 ? ((wins.length / closed.length) * 100).toFixed(1) : 'N/A'
-	const grossProfit = wins.reduce((s, t) => s + t.pnl, 0)
-	const grossLoss = losses.reduce((s, t) => s + t.pnl, 0)
-	const netProfit = finalBalance - initBalance
-	const profitFactor = grossLoss !== 0 ? (grossProfit / Math.abs(grossLoss)).toFixed(2) : '∞'
+	console.log('-'.repeat(60))
+	console.log(`${'รวม'.padEnd(12)} $${finalBalance.toFixed(2).padStart(7)} ${(netPnl >= 0 ? '+' : '') + netPnl.toFixed(2).padStart(7)} ${String(totalTrades).padStart(6)} ${totalWins.toString().padStart(5)} ${totalLosses.toString().padStart(5)} ${String(overallWR).padStart(7)}% ${overallPF.toString().padStart(5)}`)
+	console.log(`${'='.repeat(60)}`)
+	console.log(`เรียก AI: ${aiCalls} ครั้ง`)
+	console.log(`ยอดรวมเริ่มต้น: $${totalBalance.toFixed(2)} → $${finalBalance.toFixed(2)}`)
+	console.log(`กำไร/ขาดทุน: $${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)} (${(netPnl / totalBalance * 100).toFixed(2)}%)`)
+	console.log(`Max Drawdown: ${maxDD.toFixed(2)}%`)
+	console.log(`Profit Factor: ${overallPF}`)
+	console.log(`${'='.repeat(60)}\n`)
 
-	const avgWin = wins.length > 0 ? (wins.reduce((s, t) => s + t.pnl, 0) / wins.length).toFixed(2) : 'N/A'
-	const avgLoss = losses.length > 0 ? (losses.reduce((s, t) => s + t.pnl, 0) / losses.length).toFixed(2) : 'N/A'
+	const allWins = allClosedTrades.filter(t => t.result === 'WIN')
+	const allLosses = allClosedTrades.filter(t => t.result === 'LOSS')
 
-	console.log(`\n${'='.repeat(50)}`)
-	console.log(`📊 ผล Backtest: ${SYMBOL} ${TF}`)
-	console.log(`${'='.repeat(50)}`)
-	console.log(`ระยะเวลา:         ${totalCandles} candles`)
-	console.log(`เรียก AI:         ${aiCalls} ครั้ง`)
-	console.log(`เทรดทั้งหมด:      ${totalTrades} ครั้ง`)
-	console.log(`ปิดแล้ว:          ${closed.length} (WIN: ${wins.length} / LOSS: ${losses.length})`)
-	console.log(`Win Rate:         ${winRate}%`)
-	console.log(`ยอดเริ่มต้น:      $${initBalance.toFixed(2)}`)
-	console.log(`ยอดสุดท้าย:       $${finalBalance.toFixed(2)}`)
-	console.log(`กำไร/ขาดทุน:      $${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} (${(netProfit / initBalance * 100).toFixed(2)}%)`)
-	console.log(`Max Drawdown:     ${maxDrawdown.toFixed(2)}%`)
-	console.log(`Profit Factor:    ${profitFactor}`)
-	console.log(`Avg Win:          $${avgWin}`)
-	console.log(`Avg Loss:         $${avgLoss}`)
-	console.log(`Best Trade:       $${Math.max(...wins.map(t => t.pnl), 0).toFixed(2)}`)
-	console.log(`Worst Trade:      $${Math.min(...losses.map(t => t.pnl), 0).toFixed(2)}`)
-	console.log(`${'='.repeat(50)}\n`)
+	const symbolSummaries = Object.entries(tradesMap).map(([sym, trades]) => {
+		const closed = trades.filter(t => t.result !== 'UNKNOWN')
+		const wins = closed.filter(t => t.result === 'WIN')
+		const losses = closed.filter(t => t.result === 'LOSS')
+		const wr = closed.length > 0 ? (wins.length / closed.length * 100).toFixed(1) : '0.0'
+		const gp = wins.reduce((s, t) => s + t.pnl, 0)
+		const gl = losses.reduce((s, t) => s + t.pnl, 0)
+		const pf = gl !== 0 ? (gp / Math.abs(gl)).toFixed(2) : (closed.length > 0 ? '∞' : '-')
+		return `${sym}: $${(balances[sym] - BALANCE_PER_SYMBOL) >= 0 ? '+' : ''}${(balances[sym] - BALANCE_PER_SYMBOL).toFixed(2)} | ${closed.length}เทรด | WR ${wr}% | PF ${pf}`
+	}).join('\n')
 
 	await sendBacktestReport({
-		symbol: SYMBOL,
+		symbol: `${SYMBOLS.length} สินทรัพย์`,
 		tf: TF,
-		candles: totalCandles,
+		candles: CANDLE_COUNT,
 		aiCalls,
 		totalTrades,
-		closed: closed.length,
-		wins: wins.length,
-		losses: losses.length,
-		winRate,
-		profitFactor,
-		initialBalance: initBalance,
+		closed: totalClosed,
+		wins: totalWins,
+		losses: totalLosses,
+		winRate: overallWR,
+		profitFactor: overallPF,
+		initialBalance: totalBalance,
 		finalBalance,
-		netProfit,
-		returnPct: ((netProfit / initBalance) * 100).toFixed(2),
-		maxDrawdown: maxDrawdown.toFixed(2),
-		bestTrade: wins.length > 0 ? Math.max(...wins.map(t => t.pnl)) : 0,
-		worstTrade: losses.length > 0 ? Math.min(...losses.map(t => t.pnl)) : 0,
+		netProfit: netPnl,
+		returnPct: ((netPnl / totalBalance) * 100).toFixed(2),
+		maxDrawdown: maxDD.toFixed(2),
+		bestTrade: allWins.length > 0 ? Math.max(...allWins.map(t => t.pnl)) : 0,
+		worstTrade: allLosses.length > 0 ? Math.min(...allLosses.map(t => t.pnl)) : 0,
+		symbolSummaries,
 	})
 }
 

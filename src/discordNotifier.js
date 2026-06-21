@@ -38,8 +38,9 @@ function trendText(trend) {
 }
 
 function formatReason(reason) {
-	if (!reason || reason.length <= 150) return reason ?? '-'
-	return reason.slice(0, 147) + '...'
+	if (!reason) return '-'
+	if (reason.length <= 1000) return reason
+	return reason.slice(0, 997) + '...'
 }
 
 async function sendOrderNotification({ action, symbol, size, entry, sl, tp, confidence, reason, trend_alignment, chartBuffers }) {
@@ -156,11 +157,14 @@ async function sendCycleSummary(results) {
 			outcome = r.reason ?? '-'
 		}
 
+		const aiNote = r.aiAnalysis && r.aiAnalysis !== r.reason ? `🤔 ${formatReason(r.aiAnalysis)}` : ''
+
 		const value = [
 			`${actionEmoji} | ${bar} **${pct}**`,
 			trendText(r.trend_alignment),
 			`└ ${outcome}`,
-		].join('\n')
+			aiNote,
+		].filter(Boolean).join('\n')
 
 		return { name: `${symbolEmoji} ${symbolName}`, value, inline: false }
 	})

@@ -110,7 +110,7 @@ async function runAllCycles() {
 	for (const decision of decisions) {
 		const symbol = decision.symbol
 		const symbolData = allData.find(d => d.symbol === symbol)
-		const cycleReport = { ...decision, status: 'OK', symbol }
+		const cycleReport = { ...decision, status: 'OK', symbol, aiAnalysis: decision.reason }
 
 		try {
 			const alreadyOpen = await hasOpenPosition(symbol)

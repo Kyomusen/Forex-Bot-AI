@@ -7,7 +7,7 @@ import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition, logOpenPositions } from './orderManager.js'
 import { renderChart } from './chartRenderer.js'
 import { addTrade, getHistorySummary } from './tradeHistory.js'
-import { sendOrderNotification, sendErrorNotification, sendCycleNotification } from './discordNotifier.js'
+import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
 
 dotenv.config()
 
@@ -144,12 +144,12 @@ async function runAssetCycle(symbol) {
 		
 		// Stop the bot on error as requested
 		console.error(`[Bot] Stopping bot due to fatal error in ${symbol}.`)
-		await sendCycleNotification(cycleReport)
+		await sendErrorNotification(`${symbol} cycle error: ${err.message}`)
 		process.exit(1)
 	}
 
 	// Always send cycle notification
-	await sendCycleNotification(cycleReport)
+	await sendCycleSummary([cycleReport])
 }
 
 async function runAllCycles() {
@@ -187,6 +187,8 @@ async function runAllCycles() {
 	const decisions = await getAIDecision(allData, getHistorySummary()) 
 	console.log('[Bot] AI decisions received')
 
+	const results = []
+
 	for (const decision of decisions) {
 		const symbol = decision.symbol
 		const symbolData = allData.find(d => d.symbol === symbol)
@@ -195,12 +197,18 @@ async function runAllCycles() {
 		
 		try {
 			const alreadyOpen = await hasOpenPosition(symbol)
-			if (alreadyOpen) continue
+			if (alreadyOpen) {
+				cycleReport.action = 'HOLD'
+				cycleReport.reason = 'มี Position เปิดอยู่แล้ว'
+				results.push(cycleReport)
+				continue
+			}
 
 			if (decision.action === 'HOLD') {
 				console.log(`[Bot] ${symbol} AI บอก HOLD — ${decision.reason}`)
 			} else if (decision.trend_alignment === 'conflicted') {
 				console.log(`[Bot] ${symbol} trend ขัดแย้งกัน — ไม่เปิด order`)
+				cycleReport.reason = 'trend ขัดแย้งกัน'
 			} else {
 				const orderParams = buildOrderParams({
 					decision,
@@ -213,36 +221,45 @@ async function runAllCycles() {
 					const result = await placeOrder(orderParams)
 					if (result) {
 						console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ`)
-					addTrade({
-						dealId: result.dealReference ?? null,
-						action: decision.action,
-						confidence: decision.confidence,
-						trend_alignment: decision.trend_alignment,
-						reason: decision.reason,
-						entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
-						sl_pips: decision.sl_pips,
-						tp_pips: decision.tp_pips,
-					})
-					await sendOrderNotification({ 
-						action: decision.action,
-						symbol: symbol,
-						size: orderParams.size,
-						entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
-						sl: orderParams.stopLevel,
-						tp: orderParams.profitLevel,
-						confidence: decision.confidence,
-						reason: decision.reason,
-						trend_alignment: decision.trend_alignment,
-						chartBuffers: symbolData.charts
-					})
+						addTrade({
+							dealId: result.dealReference ?? null,
+							action: decision.action,
+							confidence: decision.confidence,
+							trend_alignment: decision.trend_alignment,
+							reason: decision.reason,
+							entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
+							sl_pips: decision.sl_pips,
+							tp_pips: decision.tp_pips,
+						})
+						await sendOrderNotification({ 
+							action: decision.action,
+							symbol: symbol,
+							size: orderParams.size,
+							entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
+							sl: orderParams.stopLevel,
+							tp: orderParams.profitLevel,
+							confidence: decision.confidence,
+							reason: decision.reason,
+							trend_alignment: decision.trend_alignment,
+							chartBuffers: symbolData.charts
+						})
+					} else {
+						cycleReport.status = 'ERROR'
+						cycleReport.reason = 'เปิด order ไม่สำเร็จ'
 					}
+				} else {
+					cycleReport.reason = 'Risk parameters ไม่ผ่าน'
 				}
 			}
 		} catch (err) {
 			console.error(`[Bot] ${symbol} error:`, err.message)
+			cycleReport.status = 'ERROR'
+			cycleReport.reason = err.message
 		}
-		await sendCycleNotification(cycleReport)
+		results.push(cycleReport)
 	}
+
+	await sendCycleSummary(results)
 }
 
 async function start() {
@@ -255,6 +272,12 @@ async function start() {
 	await createSession()
 
 	await runAllCycles()
+
+	const singleRun = process.env.SINGLE_RUN === 'true'
+	if (singleRun) {
+		console.log('[Bot] SINGLE_RUN=true — จบรอบนี้แล้วหยุด')
+		return
+	}
 
 	cron.schedule(CRON_SCHEDULE, async () => {
 		await runAllCycles()

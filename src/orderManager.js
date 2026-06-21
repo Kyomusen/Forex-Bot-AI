@@ -2,6 +2,7 @@ import {
 	openPosition,
 	closePosition,
 	getOpenPositions,
+	toEpic,
 } from './capitalClient.js'
 
 async function placeOrder(orderParams) {
@@ -44,7 +45,7 @@ async function hasOpenPosition(symbol) {
 
 		return positions.some(pos => {
 			const epic = pos.market?.epic ?? ''
-			return epic.toUpperCase().includes(symbol.toUpperCase())
+			return epic.toUpperCase() === toEpic(symbol).toUpperCase()
 		})
 	} catch (err) {
 		console.error('[Order] ดึง positions ล้มเหลว:', err.response?.data ?? err.message)

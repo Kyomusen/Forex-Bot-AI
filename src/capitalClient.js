@@ -5,6 +5,14 @@ dotenv.config()
 
 const BASE_URL = 'https://api-capital.backend-capital.com/api/v1'
 
+const SYMBOL_TO_EPIC = {
+	XAUUSD: 'GOLD',
+}
+
+function toEpic(symbol) {
+	return SYMBOL_TO_EPIC[symbol] ?? symbol
+}
+
 const SESSION_TTL_MS = 9 * 60 * 1000
 
 let sessionTokens = {
@@ -48,8 +56,9 @@ function getAuthHeaders() {
 	}
 }
 
-async function getCandles(epic, resolution = 'MINUTE_15', max = 100) {
+async function getCandles(symbol, resolution = 'MINUTE_15', max = 100) {
 	await ensureSession()
+	const epic = toEpic(symbol)
 	const res = await axios.get(`${BASE_URL}/prices/${epic}`, {
 		headers: getAuthHeaders(),
 		params: { resolution, max },
@@ -68,7 +77,7 @@ async function getOpenPositions() {
 async function openPosition({ epic, direction, size, stopLevel, profitLevel }) {
 	await ensureSession()
 	const res = await axios.post(`${BASE_URL}/positions`, {
-		epic,
+		epic: toEpic(epic),
 		direction,
 		size,
 		guaranteedStop: false,
@@ -88,8 +97,9 @@ async function closePosition(dealId) {
 	return res.data
 }
 
-async function getMarketInfo(epic) {
+async function getMarketInfo(symbol) {
 	await ensureSession()
+	const epic = toEpic(symbol)
 	const res = await axios.get(`${BASE_URL}/markets/${epic}`, {
 		headers: getAuthHeaders(),
 	})
@@ -103,4 +113,6 @@ export {
 	openPosition,
 	closePosition,
 	getMarketInfo,
+	SYMBOL_TO_EPIC,
+	toEpic,
 }

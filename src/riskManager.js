@@ -5,8 +5,11 @@ dotenv.config()
 const RISK_PERCENT = parseFloat(process.env.RISK_PERCENT ?? '1')
 
 function pipToPrice(pips, symbol) {
+	const upper = symbol.toUpperCase()
 	const jpyPairs = ['USDJPY', 'EURJPY', 'GBPJPY', 'AUDJPY', 'CADJPY', 'NZDJPY', 'CHFJPY']
-	const isJpy = jpyPairs.some(p => symbol.toUpperCase().includes(p.replace('/', '')))
+	const isJpy = jpyPairs.some(p => upper.includes(p.replace('/', '')))
+	const isGold = upper.includes('XAU') || upper.includes('GOLD')
+	if (isGold) return pips * 0.01
 	return isJpy ? pips * 0.01 : pips * 0.0001
 }
 

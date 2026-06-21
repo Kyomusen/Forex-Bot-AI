@@ -2,6 +2,7 @@ import dotenv from 'dotenv'
 import { createSession, getCandles } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
 import { getAIDecision } from './aiDecision.js'
+import { sendBacktestReport } from './discordNotifier.js'
 
 dotenv.config()
 
@@ -234,10 +235,10 @@ async function runBacktest() {
 		console.log(`[Backtest] candle#${i} ${decision.action} @ ${price} | SL: ${sl.toFixed(5)} TP: ${tp.toFixed(5)} | confidence: ${((decision.confidence ?? 0) * 100).toFixed(0)}%`)
 	}
 
-	printReport(trades, INITIAL_BALANCE, balance, maxDrawdown, aiCallsUsed, candles.length)
+	await printReport(trades, INITIAL_BALANCE, balance, maxDrawdown, aiCallsUsed, candles.length)
 }
 
-function printReport(trades, initBalance, finalBalance, maxDrawdown, aiCalls, totalCandles) {
+async function printReport(trades, initBalance, finalBalance, maxDrawdown, aiCalls, totalCandles) {
 	const totalTrades = trades.length
 	const closed = trades.filter(t => t.result !== 'UNKNOWN')
 	const wins = closed.filter(t => t.result === 'WIN')
@@ -269,9 +270,29 @@ function printReport(trades, initBalance, finalBalance, maxDrawdown, aiCalls, to
 	console.log(`Best Trade:       $${Math.max(...wins.map(t => t.pnl), 0).toFixed(2)}`)
 	console.log(`Worst Trade:      $${Math.min(...losses.map(t => t.pnl), 0).toFixed(2)}`)
 	console.log(`${'='.repeat(50)}\n`)
+
+	await sendBacktestReport({
+		symbol: SYMBOL,
+		tf: TF,
+		candles: totalCandles,
+		aiCalls,
+		totalTrades,
+		closed: closed.length,
+		wins: wins.length,
+		losses: losses.length,
+		winRate,
+		profitFactor,
+		initialBalance: initBalance,
+		finalBalance,
+		netProfit,
+		returnPct: ((netProfit / initBalance) * 100).toFixed(2),
+		maxDrawdown: maxDrawdown.toFixed(2),
+		bestTrade: wins.length > 0 ? Math.max(...wins.map(t => t.pnl)) : 0,
+		worstTrade: losses.length > 0 ? Math.min(...losses.map(t => t.pnl)) : 0,
+	})
 }
 
-runBacktest().catch(err => {
+runBacktest().catch(async err => {
 	console.error('[Backtest] fatal:', err.message)
 	process.exit(1)
 })

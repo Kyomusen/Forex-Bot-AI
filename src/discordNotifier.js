@@ -183,4 +183,39 @@ async function sendCycleSummary(results, runCount) {
 	}
 }
 
-export { sendOrderNotification, sendErrorNotification, sendCycleSummary }
+async function sendBacktestReport(report) {
+	if (!WEBHOOK_URL) return
+
+	const color = report.netProfit >= 0 ? 0x00c896 : 0xff4466
+	const sign = report.netProfit >= 0 ? '+' : ''
+
+	const embed = {
+		title: `📊 Backtest: ${report.symbol} ${report.tf}`,
+		color,
+		fields: [
+			{ name: '⏱ ระยะเวลา', value: `${report.candles} candles`, inline: true },
+			{ name: '🤖 ใช้ AI', value: report.aiCalls > 0 ? `${report.aiCalls} ครั้ง` : '❌ ไม่ใช้', inline: true },
+			{ name: '📈 เทรดทั้งหมด', value: String(report.totalTrades), inline: true },
+			{ name: '✅ ปิดแล้ว', value: `${report.closed} (WIN: ${report.wins} / LOSS: ${report.losses})`, inline: true },
+			{ name: '🎯 Win Rate', value: `**${report.winRate}%**`, inline: true },
+			{ name: 'Profit Factor', value: report.profitFactor, inline: true },
+			{ name: '💰 ยอดเริ่มต้น', value: `$${report.initialBalance.toFixed(2)}`, inline: true },
+			{ name: '💵 ยอดสุดท้าย', value: `$${report.finalBalance.toFixed(2)}`, inline: true },
+			{ name: '📊 กำไร/ขาดทุน', value: `**${sign}$${report.netProfit.toFixed(2)} (${sign}${report.returnPct}%)**`, inline: true },
+			{ name: '📉 Max Drawdown', value: `${report.maxDrawdown}%`, inline: true },
+			{ name: '🏆 Best Trade', value: `$${report.bestTrade.toFixed(2)}`, inline: true },
+			{ name: '💀 Worst Trade', value: `$${report.worstTrade.toFixed(2)}`, inline: true },
+		],
+		timestamp: new Date().toISOString(),
+		footer: { text: 'Forex Backtest' },
+	}
+
+	try {
+		await axios.post(WEBHOOK_URL, { embeds: [embed] })
+		console.log('[Discord] ✅ ส่ง backtest report สำเร็จ')
+	} catch (err) {
+		console.error('[Discord] ❌ ส่ง backtest report ล้มเหลว:', err.response?.data ?? err.message)
+	}
+}
+
+export { sendOrderNotification, sendErrorNotification, sendCycleSummary, sendBacktestReport }

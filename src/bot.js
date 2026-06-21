@@ -6,8 +6,9 @@ import { getAIDecision } from './aiDecision.js'
 import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition, logOpenPositions } from './orderManager.js'
 import { renderChart } from './chartRenderer.js'
-import { addTrade, getHistorySummary } from './tradeHistory.js'
+import { addTrade, getLearningHistory } from './tradeHistory.js'
 import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
+import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 
 dotenv.config()
 
@@ -43,127 +44,25 @@ const TIMEFRAMES = SELECTED_TFS.map(tf => ({
 	label: tf.replace('MINUTE_', '').replace('HOUR', '1H').replace('DAY', '1D').replace('4H', '4H') // Simplify labels
 }))
 
-async function runAssetCycle(symbol) {
-	console.log(`\n[Bot] ===== ${symbol} | รอบใหม่ ${new Date().toISOString()} =====`)
-
-	let cycleReport = { action: 'HOLD', reason: 'เริ่มทำงาน', status: 'OK', symbol }
-
-	try {
-		const alreadyOpen = await hasOpenPosition(symbol)
-		if (alreadyOpen) {
-			console.log(`[Bot] ${symbol} มี position เปิดอยู่แล้ว — ข้ามรอบนี้`)
-			await logOpenPositions()
-			return
-		}
-
-		console.log(`[Bot] ${symbol} ดึง candle data...`)
-		const candleMap = {}
-		for (const { tf, label } of TIMEFRAMES) {
-			const candles = await getCandles(symbol, tf, 100)
-			if (!candles || candles.length < 60) {
-				console.log(`[Bot] ${symbol} candle ${label} ไม่เพียงพอ — ข้ามรอบนี้`)
-				return
-			}
-			candleMap[label] = candles
-		}
-
-		console.log(`[Bot] ${symbol} คำนวณ indicators...`)
-		const multiTFIndicators = getMultiTFIndicators(candleMap)
-
-		console.log(`[Bot] ${symbol} วาด chart ผ่าน QuickChart...`)
-		const chartBuffers = {}
-		for (const [label, candles] of Object.entries(candleMap)) {
-			chartBuffers[label] = await renderChart(candles, label)
-		}
-
-		console.log(`[Bot] ${symbol} โหลด trade history...`)
-		const historySummary = getHistorySummary()
-
-		console.log(`[Bot] ${symbol} ถาม AI...`)
-		const decision = await getAIDecision(symbol, multiTFIndicators, chartBuffers, historySummary)
-		console.log(`[Bot] ${symbol} decision:`, JSON.stringify(decision, null, 2))
-		cycleReport = { ...decision, status: decision.status ?? 'OK', symbol }
-
-		if (decision.action === 'HOLD') {
-			console.log(`[Bot] ${symbol} AI บอก HOLD — ${decision.reason}`)
-		} else if (decision.trend_alignment === 'conflicted') {
-			console.log(`[Bot] ${symbol} trend ขัดแย้งกัน — ไม่เปิด order`)
-			cycleReport.reason = 'trend ขัดแย้งกัน'
-		} else {
-			console.log(`[Bot] ${symbol} คำนวณ risk...`)
-			const primaryIndicators = multiTFIndicators[TIMEFRAMES[0].label]
-			const orderParams = buildOrderParams({
-				decision,
-				indicators: primaryIndicators,
-				accountBalance: ACCOUNT_BALANCE,
-				symbol: symbol,
-			})
-
-			if (!orderParams) {
-				console.log(`[Bot] ${symbol} riskManager ไม่ผ่าน — ไม่เปิด order`)
-				cycleReport.reason = 'riskManager ไม่ผ่าน'
-			} else {
-				console.log(`[Bot] ${symbol} ส่ง order...`)
-				const result = await placeOrder(orderParams)
-				if (result) {
-					console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ`)
-					addTrade({
-						dealId: result.dealReference ?? null,
-						action: decision.action,
-						confidence: decision.confidence,
-						trend_alignment: decision.trend_alignment,
-						reason: decision.reason,
-						entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
-						sl_pips: decision.sl_pips,
-						tp_pips: decision.tp_pips,
-					})
-					await sendOrderNotification({ 
-						action: decision.action,
-						symbol: symbol,
-						size: orderParams.size,
-						entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
-						sl: orderParams.stopLevel,
-						tp: orderParams.profitLevel,
-						confidence: decision.confidence,
-						reason: decision.reason,
-						trend_alignment: decision.trend_alignment,
-						chartBuffers: symbolData.charts
-					})
-				} else {
-					console.log(`[Bot] ${symbol} ❌ เปิด order ไม่สำเร็จ`)
-					cycleReport.status = 'ERROR'
-					cycleReport.reason = 'เปิด order ไม่สำเร็จ'
-				}
-			}
-		}
-
-	} catch (err) {
-		console.error(`[Bot] ${symbol} error ใน cycle:`, err.message)
-		cycleReport = { action: 'HOLD', reason: err.message, status: 'ERROR', symbol }
-		await sendErrorNotification(`${symbol} cycle error: ${err.message}`)
-		
-		// Stop the bot on error as requested
-		console.error(`[Bot] Stopping bot due to fatal error in ${symbol}.`)
-		await sendErrorNotification(`${symbol} cycle error: ${err.message}`)
-		process.exit(1)
-	}
-
-	// Always send cycle notification
-	await sendCycleSummary([cycleReport])
-}
-
 async function runAllCycles() {
-	console.log(`\n[Bot] ===== รอบใหม่ ${new Date().toISOString()} =====`)
-	
 	const allData = []
 	for (const symbol of SYMBOLS) {
 		console.log(`[Bot] ${symbol} ดึง candle data...`)
 		const candleMap = {}
 		let valid = true
 		for (const { tf, label } of TIMEFRAMES) {
-			const candles = await getCandles(symbol, tf, 100)
-			if (!candles || candles.length < 60) {
+			const cached = getCached({ symbol, tf, candles: [] })
+			const hasCache = cached && cached.length >= 60
+			const fetchCount = hasCache ? REFRESH_FETCH : INITIAL_FETCH
+			const raw = await getCandles(symbol, tf, fetchCount)
+			if (!raw || raw.length < fetchCount) {
 				console.log(`[Bot] ${symbol} candle ${label} ไม่เพียงพอ`)
+				valid = false
+				break
+			}
+			const candles = getCached({ symbol, tf, candles: raw })
+			if (!candles || candles.length < 60) {
+				console.log(`[Bot] ${symbol} candle ${label} ยังไม่เพียงพอ (${candles?.length ?? 0})`)
 				valid = false
 				break
 			}
@@ -184,7 +83,7 @@ async function runAllCycles() {
 
 	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์ในรอบเดียว...')
 	// Note: You will need to update getAIDecision to handle an array of symbols
-	const decisions = await getAIDecision(allData, getHistorySummary()) 
+	const decisions = await getAIDecision(allData, getLearningHistory()) 
 	console.log('[Bot] AI decisions received')
 
 	const results = []
@@ -210,9 +109,10 @@ async function runAllCycles() {
 				console.log(`[Bot] ${symbol} trend ขัดแย้งกัน — ไม่เปิด order`)
 				cycleReport.reason = 'trend ขัดแย้งกัน'
 			} else {
+				const primaryIndicators = symbolData.indicators[TIMEFRAMES[0].label]
 				const orderParams = buildOrderParams({
 					decision,
-					indicators: symbolData.indicators[TIMEFRAMES[0].label],
+					indicators: primaryIndicators,
 					accountBalance: ACCOUNT_BALANCE,
 					symbol: symbol,
 				})
@@ -227,9 +127,10 @@ async function runAllCycles() {
 							confidence: decision.confidence,
 							trend_alignment: decision.trend_alignment,
 							reason: decision.reason,
-							entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
+							entry: primaryIndicators.currentPrice,
 							sl_pips: decision.sl_pips,
 							tp_pips: decision.tp_pips,
+							indicators: primaryIndicators,
 						})
 						await sendOrderNotification({ 
 							action: decision.action,

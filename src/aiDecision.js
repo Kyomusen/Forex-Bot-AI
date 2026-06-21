@@ -6,8 +6,8 @@ dotenv.config()
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' })
 
-function buildBatchPrompt(allData, historySummary) {
-	const assetsPrompt = allData.map(({ symbol, indicators, charts }) => {
+function buildBatchPrompt(allData, learningHistory) {
+	const assetsPrompt = allData.map(({ symbol, indicators }) => {
 		const tfSections = Object.entries(indicators).map(([tf, ind]) => {
 			return `
 [${symbol} - ${tf}]
@@ -20,36 +20,52 @@ ATR: ${ind.atr?.toFixed(5)}`
 		return tfSections
 	}).join('\n\n')
 
-	const historySection = historySummary ? `
-=== ประวัติการเทรด ===
-${historySummary.total} trades, Winrate: ${historySummary.winrate}%` : '=== ไม่มีประวัติเทรด ==='
+	let learningSection = ''
+	if (learningHistory && learningHistory.total > 0) {
+		const recentDetail = learningHistory.recent.map(t =>
+			`  ${t.action} → ${t.result} | confidence: ${t.confidence} | trend: ${t.trend_alignment} | reason: ${t.reason}${t.entry_indicator ? ` | RSI:${t.entry_indicator.rsi} EMA:${t.entry_indicator.ema_trend} MACD:${t.entry_indicator.macd_histogram_trend}` : ''}`
+		).join('\n')
+
+		learningSection = `
+=== การเรียนรู้จากอดีต ===
+สถิติ: ${learningHistory.total} เทรด | Winrate: ${learningHistory.winrate}% (Wins: ${learningHistory.wins} / Losses: ${learningHistory.losses})
+แนวโน้ม: ${learningHistory.lesson.winRateTrend === 'positive' ? 'กำลังดีขึ้น' : 'ต้องระวัง'}
+
+รายละเอียด ${learningHistory.recent.length} เทรดล่าสุด:
+${recentDetail}
+
+${learningHistory.lesson.winPatterns.length > 0 ? `\nรูปแบบที่เคยได้กำไร:\n${learningHistory.lesson.winPatterns.map(r => `- ${r}`).join('\n')}` : ''}
+${learningHistory.lesson.lossPatterns.length > 0 ? `\nรูปแบบที่เคยขาดทุน:\n${learningHistory.lesson.lossPatterns.map(r => `- ${r}`).join('\n')}` : ''}
+
+⚠️ วิเคราะห์ด้วยว่าครั้งที่แล้วคุณตัดสินใจอะไรผิดหรือถูก แล้วปรับการตัดสินใจรอบนี้ให้ดีขึ้น`
+	} else {
+		learningSection = '\n=== ยังไม่มีประวัติเทรด ==='
+	}
 
 	return `
 คุณคือ AI เทรด Forex ผู้เชี่ยวชาญ วิเคราะห์ตลาดหลายสินทรัพย์พร้อมกัน
 ${assetsPrompt}
+${learningSection}
 
-${historySection}
-
-วิเคราะห์แต่ละสินทรัพย์และตอบเป็น JSON ARRAY เท่านั้น (ไม่ต้องใส่ backticks)
+ตอบเป็น JSON ARRAY เท่านั้น (ไม่ต้องใส่ backticks):
 [
   {
     "symbol": "...",
     "action": "BUY" | "SELL" | "HOLD",
     "sl_pips": number | null,
     "tp_pips": number | null,
-    "confidence": number,
+    "confidence": number (0-1),
     "trend_alignment": "aligned" | "mixed" | "conflicted",
-    "reason": "..."
+    "reason": "วิเคราะห์ + สิ่งที่เรียนรู้จากอดีต"
   },
   ...
 ]`.trim()
 }
 
-async function getAIDecision(allData, historySummary) {
-	const textPrompt = buildBatchPrompt(allData, historySummary)
+async function getAIDecision(allData, learningHistory) {
+	const textPrompt = buildBatchPrompt(allData, learningHistory)
 	const parts = [{ text: textPrompt }]
 
-	// Add all charts
 	for (const { symbol, charts } of allData) {
 		for (const [tf, buffer] of Object.entries(charts)) {
 			parts.push({
@@ -78,4 +94,3 @@ async function getAIDecision(allData, historySummary) {
 }
 
 export { getAIDecision }
-

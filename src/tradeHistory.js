@@ -24,35 +24,75 @@ function saveHistory(history) {
 	fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2))
 }
 
-function addTrade(trade) {
+function addTrade({ dealId, action, confidence, trend_alignment, reason, entry, sl_pips, tp_pips, indicators }) {
 	const history = loadHistory()
 	history.push({
-		...trade,
+		dealId,
+		action,
+		confidence,
+		trend_alignment,
+		reason,
+		entry,
+		sl_pips,
+		tp_pips,
+		indicators,
 		timestamp: new Date().toISOString(),
 	})
 	const trimmed = history.slice(-MAX_HISTORY)
 	saveHistory(trimmed)
 }
 
-function getHistorySummary() {
+function getLearningHistory() {
 	const history = loadHistory()
 	if (history.length === 0) return null
 
 	const closed = history.filter(t => t.result !== undefined)
 	const wins = closed.filter(t => t.result === 'WIN')
 	const losses = closed.filter(t => t.result === 'LOSS')
-	const winrate = closed.length > 0 ? ((wins.length / closed.length) * 100).toFixed(1) : 'N/A'
+	const total = closed.length
+	const winrate = total > 0 ? ((wins.length / total) * 100).toFixed(1) : 'N/A'
 
-	const recentTrades = history.slice(-10).map(t =>
-		`${t.action} → ${t.result ?? 'OPEN'} (${t.reason ?? ''})`
-	)
+	const learningData = history.slice(-20).map(t => ({
+		action: t.action,
+		entry: t.entry,
+		sl_pips: t.sl_pips,
+		tp_pips: t.tp_pips,
+		confidence: t.confidence,
+		trend_alignment: t.trend_alignment,
+		reason: t.reason,
+		result: t.result ?? 'ยังไม่จบ',
+		pipsPnL: t.pipsPnL ?? null,
+		entry_indicator: t.indicators ? {
+			rsi: t.indicators.rsi,
+			ema_trend: t.indicators.emaTrend,
+			macd_histogram_trend: t.indicators.macd?.histogramTrend,
+			atr: t.indicators.atr,
+		} : null,
+	}))
 
 	return {
-		total: closed.length,
+		total,
 		wins: wins.length,
 		losses: losses.length,
 		winrate,
-		recentTrades,
+		recent: learningData,
+		lesson: buildLesson(closed),
+	}
+}
+
+function buildLesson(closed) {
+	if (closed.length < 3) return 'ข้อมูลยังน้อยเกินไปสำหรับการวิเคราะห์'
+
+	const wins = closed.filter(t => t.result === 'WIN')
+	const losses = closed.filter(t => t.result === 'LOSS')
+
+	const winReasons = wins.map(t => t.reason).filter(Boolean)
+	const lossReasons = losses.map(t => t.reason).filter(Boolean)
+
+	return {
+		winPatterns: winReasons,
+		lossPatterns: lossReasons,
+		winRateTrend: wins.length >= losses.length ? 'positive' : 'negative',
 	}
 }
 
@@ -66,4 +106,4 @@ function updateTradeResult(dealId, result, pipsPnL) {
 	}
 }
 
-export { addTrade, getHistorySummary, updateTradeResult }
+export { addTrade, getLearningHistory, updateTradeResult }

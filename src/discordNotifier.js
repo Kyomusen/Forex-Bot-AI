@@ -24,6 +24,24 @@ function getSymbolDisplay(symbol) {
 	return SYMBOL_DISPLAY[symbol] ?? { name: symbol, emoji: '🔹' }
 }
 
+function confidenceBar(confidence) {
+	const bars = Math.round(confidence * 10)
+	const filled = '█'.repeat(bars)
+	const empty = '░'.repeat(10 - bars)
+	return filled + empty
+}
+
+function trendText(trend) {
+	if (trend === 'aligned') return '✅ aligned'
+	if (trend === 'mixed') return '⚠️ mixed'
+	return '❌ conflicted'
+}
+
+function formatReason(reason) {
+	if (!reason || reason.length <= 150) return reason ?? '-'
+	return reason.slice(0, 147) + '...'
+}
+
 async function sendOrderNotification({ action, symbol, size, entry, sl, tp, confidence, reason, trend_alignment, chartBuffers }) {
 	if (!WEBHOOK_URL) {
 		console.warn('[Discord] ไม่มี DISCORD_WEBHOOK_URL — ข้ามการแจ้งเตือน')
@@ -33,22 +51,40 @@ async function sendOrderNotification({ action, symbol, size, entry, sl, tp, conf
 	const { name: symbolName, emoji: symbolEmoji } = getSymbolDisplay(symbol)
 	const color = ACTION_COLOR[action] ?? 0x888888
 	const actionEmoji = action === 'BUY' ? '🟢 BUY' : '🔴 SELL'
-	const alignEmoji = trend_alignment === 'aligned' ? '✅ aligned' : '⚠️ conflicted'
+	const pct = (confidence * 100).toFixed(0)
 
 	const embed = {
 		title: `${symbolEmoji} ${symbolName} — ${actionEmoji}`,
 		color,
 		fields: [
-			{ name: 'Entry', value: String(entry), inline: true },
-			{ name: 'Size', value: String(size), inline: true },
-			{ name: 'Confidence', value: `${(confidence * 100).toFixed(0)}%`, inline: true },
-			{ name: 'Stop Loss', value: String(sl), inline: true },
-			{ name: 'Take Profit', value: String(tp), inline: true },
-			{ name: 'Trend Alignment', value: alignEmoji, inline: true },
-			{ name: 'เหตุผล', value: reason ?? '-', inline: false },
+			{
+				name: '🤔 การวิเคราะห์ของ AI',
+				value: formatReason(reason),
+				inline: false,
+			},
+			{
+				name: '📊 ความมั่นใจ',
+				value: `${confidenceBar(confidence)} **${pct}%**`,
+				inline: true,
+			},
+			{
+				name: '🎯 แนวโน้ม',
+				value: trendText(trend_alignment),
+				inline: true,
+			},
+			{
+				name: '📋 รายละเอียดออเดอร์',
+				value: [
+					`Entry: **${entry}**`,
+					`Size: **${size}**`,
+					`SL: **${sl}**`,
+					`TP: **${tp}**`,
+				].join('\n'),
+				inline: false,
+			},
 		],
 		timestamp: new Date().toISOString(),
-		footer: { text: 'Forex Bot' },
+		footer: { text: 'Forex Bot • คำตัดสินของ AI' },
 	}
 
 	if (chartBuffers && Object.keys(chartBuffers).length > 0) {
@@ -100,12 +136,33 @@ async function sendCycleSummary(results) {
 	const fields = results.map(r => {
 		const { name: symbolName, emoji: symbolEmoji } = getSymbolDisplay(r.symbol)
 		const actionEmoji = r.action === 'BUY' ? '🟢 BUY' : r.action === 'SELL' ? '🔴 SELL' : '⚫ HOLD'
-		const statusEmoji = r.status === 'ERROR' ? '❌' : '✅'
-		return {
-			name: `${symbolEmoji} ${symbolName}`,
-			value: `${statusEmoji} ${actionEmoji}\n${r.reason ?? '-'}`,
-			inline: false,
+		const pct = r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : '-'
+		const bar = r.confidence != null ? confidenceBar(r.confidence) : ''
+
+		let outcome
+		if (r.status === 'ERROR') {
+			outcome = `❌ ${r.reason ?? 'Error'}`
+		} else if (r.action === 'HOLD' || r.action === null) {
+			outcome = `⏭️ ${r.reason ?? 'Hold'}`
+		} else if (r.reason === 'มี Position เปิดอยู่แล้ว') {
+			outcome = `⏸️ ${r.reason}`
+		} else if (r.reason === 'trend ขัดแย้งกัน') {
+			outcome = `⚠️ ${r.reason}`
+		} else if (r.reason === 'Risk parameters ไม่ผ่าน') {
+			outcome = `🛑 ${r.reason}`
+		} else if (r.status === 'OK') {
+			outcome = `✅ ${r.reason ?? 'เปิด order สำเร็จ'}`
+		} else {
+			outcome = r.reason ?? '-'
 		}
+
+		const value = [
+			`${actionEmoji} | ${bar} **${pct}**`,
+			trendText(r.trend_alignment),
+			`└ ${outcome}`,
+		].join('\n')
+
+		return { name: `${symbolEmoji} ${symbolName}`, value, inline: false }
 	})
 
 	const anyError = results.some(r => r.status === 'ERROR')

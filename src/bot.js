@@ -67,7 +67,7 @@ async function runAllCycles() {
 			const fetchCount = hasCache ? REFRESH_FETCH : INITIAL_FETCH
 			const raw = await getCandles(symbol, tf, fetchCount)
 
-			if (!raw || raw.length < 10) {
+			if (!raw || raw.length < fetchCount) {
 				console.log(`[Bot] ${symbol} candle ${label} ไม่เพียงพอ`)
 				valid = false
 				break

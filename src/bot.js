@@ -4,11 +4,13 @@ import { createSession, getCandles } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
 import { getAIDecision } from './aiDecision.js'
 import { buildOrderParams } from './riskManager.js'
-import { placeOrder, hasOpenPosition, logOpenPositions } from './orderManager.js'
+import { placeOrder, hasOpenPosition } from './orderManager.js'
 import { renderChart } from './chartRenderer.js'
-import { addTrade, getLearningHistory } from './tradeHistory.js'
+import { addTrade, getLearningHistory, loadHistory, saveHistory } from './tradeHistory.js'
 import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
+import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
+import { getOpenPositions } from './capitalClient.js'
 
 dotenv.config()
 
@@ -83,7 +85,7 @@ async function runAllCycles() {
 
 	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์ในรอบเดียว...')
 	// Note: You will need to update getAIDecision to handle an array of symbols
-	const decisions = await getAIDecision(allData, getLearningHistory()) 
+	const decisions = await getAIDecision(allData, getLearningHistory(), loadKnowledge()) 
 	console.log('[Bot] AI decisions received')
 
 	const results = []
@@ -123,6 +125,7 @@ async function runAllCycles() {
 						console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ`)
 						addTrade({
 							dealId: result.dealReference ?? null,
+							symbol,
 							action: decision.action,
 							confidence: decision.confidence,
 							trend_alignment: decision.trend_alignment,
@@ -161,6 +164,20 @@ async function runAllCycles() {
 	}
 
 	await sendCycleSummary(results)
+
+	// Self-learning: sync closed trades and update knowledge
+	try {
+		const positions = await getOpenPositions()
+		const openDealIds = new Set((positions ?? []).map(p => p.position?.dealId).filter(Boolean))
+		const hist = loadHistory()
+		if (syncTradeResults(hist, openDealIds)) {
+			saveHistory(hist)
+			console.log('[Learn] อัปเดตผลเทรดที่ปิดแล้ว')
+		}
+		updateKnowledge(hist)
+	} catch (err) {
+		console.error('[Learn] error:', err.message)
+	}
 }
 
 async function start() {

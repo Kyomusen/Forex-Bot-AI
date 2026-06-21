@@ -24,10 +24,11 @@ function saveHistory(history) {
 	fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2))
 }
 
-function addTrade({ dealId, action, confidence, trend_alignment, reason, entry, sl_pips, tp_pips, indicators }) {
+function addTrade({ dealId, symbol, action, confidence, trend_alignment, reason, entry, sl_pips, tp_pips, indicators }) {
 	const history = loadHistory()
 	history.push({
 		dealId,
+		symbol,
 		action,
 		confidence,
 		trend_alignment,
@@ -106,4 +107,4 @@ function updateTradeResult(dealId, result, pipsPnL) {
 	}
 }
 
-export { addTrade, getLearningHistory, updateTradeResult }
+export { addTrade, getLearningHistory, updateTradeResult, loadHistory, saveHistory }

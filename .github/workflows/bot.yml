@@ -16,6 +16,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore candle cache
+        uses: actions/cache@v4
+        id: candle-cache
+        with:
+          path: logs/candle_cache.json
+          key: candle-cache-${{ github.run_id }}
+          restore-keys: |
+            candle-cache-
+
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
 

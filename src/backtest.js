@@ -127,7 +127,8 @@ async function runBacktest() {
 			const result = checkSLTP(position, candles, position.entryIdx + 1, i + 1)
 			if (result) {
 				const multiplier = position.type === 'BUY' ? 1 : -1
-				const pnl = (result.price - position.entry) * position.size * multiplier
+				const pnlPips = (result.price - position.entry) / pipToPrice(1, SYMBOL)
+				const pnl = pnlPips * position.size * (pipToPrice(1, SYMBOL) * 100000) * multiplier
 				balance += pnl
 
 				const resultType = result.type === 'TP' ? 'WIN' : 'LOSS'

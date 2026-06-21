@@ -136,42 +136,38 @@ async function sendCycleSummary(results, runCount) {
 
 	const embeds = results.map(r => {
 		const { name: symbolName, emoji: symbolEmoji } = getSymbolDisplay(r.symbol)
-		const actionEmoji = r.action === 'BUY' ? '🟢 BUY' : r.action === 'SELL' ? '🔴 SELL' : '⚫ HOLD'
+		const actionText = r.action ?? 'HOLD'
 		const pct = r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : '-'
-		const bar = r.confidence != null ? confidenceBar(r.confidence) : ''
-		const color = r.action === 'BUY' ? ACTION_COLOR.BUY : r.action === 'SELL' ? ACTION_COLOR.SELL : ACTION_COLOR.HOLD
 
-		let outcome
+		let color, statusIcon
 		if (r.status === 'ERROR') {
-			outcome = `❌ ${r.reason ?? 'Error'}`
+			color = 0xff4466
+			statusIcon = '❌'
 		} else if (r.action === 'HOLD' || r.action === null) {
-			outcome = `⏭️ ${r.reason ?? 'Hold'}`
-		} else if (r.reason === 'มี Position เปิดอยู่แล้ว') {
-			outcome = `⏸️ ${r.reason}`
-		} else if (r.reason === 'trend ขัดแย้งกัน') {
-			outcome = `⚠️ ${r.reason}`
-		} else if (r.reason === 'Risk parameters ไม่ผ่าน') {
-			outcome = `🛑 ${r.reason}`
+			color = 0xff8800
+			statusIcon = '⏭️'
+		} else if (r.reason === 'มี Position เปิดอยู่แล้ว' || r.reason === 'trend ขัดแย้งกัน' || r.reason === 'Risk parameters ไม่ผ่าน') {
+			color = 0xff8800
+			statusIcon = '⏭️'
 		} else if (r.status === 'OK') {
-			outcome = `✅ ${r.reason ?? 'เปิด order สำเร็จ'}`
+			color = 0x00c896
+			statusIcon = '✅'
 		} else {
-			outcome = r.reason ?? '-'
+			color = 0xff8800
+			statusIcon = '⏭️'
 		}
 
-		const analysis = r.aiAnalysis && r.aiAnalysis !== r.reason ? r.aiAnalysis : r.reason
+		const outcome = r.reason ?? '-'
+		const analysis = r.aiAnalysis && r.aiAnalysis !== r.reason ? r.aiAnalysis : null
 
-		const description = [
-			`${actionEmoji} | ${bar} **${pct}**`,
-			trendText(r.trend_alignment),
-			`${outcome}`,
-			'',
-			`🤔 ${formatReason(analysis)}`,
-		].join('\n')
+		const lines = [`${statusIcon} confident ${pct}`]
+		if (outcome) lines.push(outcome)
+		if (analysis) lines.push('', `🤔 ${formatReason(analysis)}`)
 
 		return {
-			title: `#${runCount} ${symbolEmoji} ${symbolName} — ${r.action ?? 'HOLD'}`,
+			title: `#${runCount} ${symbolEmoji} ${symbolName} — ${actionText}`,
 			color,
-			description,
+			description: lines.join('\n'),
 			timestamp: new Date().toISOString(),
 			footer: { text: 'Forex Bot' },
 		}

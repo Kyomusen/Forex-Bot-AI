@@ -131,14 +131,15 @@ async function sendErrorNotification(message) {
 	}
 }
 
-async function sendCycleSummary(results) {
+async function sendCycleSummary(results, runCount) {
 	if (!WEBHOOK_URL || results.length === 0) return
 
-	const fields = results.map(r => {
+	const embeds = results.map(r => {
 		const { name: symbolName, emoji: symbolEmoji } = getSymbolDisplay(r.symbol)
 		const actionEmoji = r.action === 'BUY' ? '🟢 BUY' : r.action === 'SELL' ? '🔴 SELL' : '⚫ HOLD'
 		const pct = r.confidence != null ? `${(r.confidence * 100).toFixed(0)}%` : '-'
 		const bar = r.confidence != null ? confidenceBar(r.confidence) : ''
+		const color = r.action === 'BUY' ? ACTION_COLOR.BUY : r.action === 'SELL' ? ACTION_COLOR.SELL : ACTION_COLOR.HOLD
 
 		let outcome
 		if (r.status === 'ERROR') {
@@ -157,36 +158,27 @@ async function sendCycleSummary(results) {
 			outcome = r.reason ?? '-'
 		}
 
-		const aiNote = r.aiAnalysis && r.aiAnalysis !== r.reason ? `🤔 ${formatReason(r.aiAnalysis)}` : ''
+		const analysis = r.aiAnalysis && r.aiAnalysis !== r.reason ? r.aiAnalysis : r.reason
 
-		const value = [
+		const description = [
 			`${actionEmoji} | ${bar} **${pct}**`,
 			trendText(r.trend_alignment),
-			`└ ${outcome}`,
-			aiNote,
-		].filter(Boolean).join('\n')
+			`${outcome}`,
+			'',
+			`🤔 ${formatReason(analysis)}`,
+		].join('\n')
 
-		return { name: `${symbolEmoji} ${symbolName}`, value, inline: false }
+		return {
+			title: `#${runCount} ${symbolEmoji} ${symbolName} — ${r.action ?? 'HOLD'}`,
+			color,
+			description,
+			timestamp: new Date().toISOString(),
+			footer: { text: 'Forex Bot' },
+		}
 	})
 
-	const anyError = results.some(r => r.status === 'ERROR')
-	const anyTrade = results.some(r => r.action === 'BUY' || r.action === 'SELL')
-
-	let title = '📊 รอบการทำงาน'
-	if (anyTrade) title += ' — มีการเปิด Position'
-	else if (anyError) title += ' — มี Error'
-	else title += ' — ทั้งหมด HOLD'
-
-	const embed = {
-		title,
-		color: anyError ? ACTION_COLOR.ERROR : anyTrade ? 0x00c896 : 0x888888,
-		fields,
-		timestamp: new Date().toISOString(),
-		footer: { text: `Forex Bot • ${results.length} สินทรัพย์` },
-	}
-
 	try {
-		await axios.post(WEBHOOK_URL, { embeds: [embed] })
+		await axios.post(WEBHOOK_URL, { embeds })
 		console.log('[Discord] ✅ ส่ง cycle summary สำเร็จ')
 	} catch (err) {
 		console.error('[Discord] ❌ ส่ง cycle summary ล้มเหลว:', err.response?.data ?? err.message)

@@ -16,6 +16,7 @@ dotenv.config()
 const SYMBOLS = (process.env.SYMBOLS ?? 'EURUSD').split(',')
 const ACCOUNT_BALANCE = parseFloat(process.env.ACCOUNT_BALANCE ?? '1000')
 const PRIMARY_TIMEFRAME = process.env.TIMEFRAME ?? 'MINUTE_15'
+const RUN_NUMBER = process.env.GITHUB_RUN_NUMBER ?? '1'
 
 const TF_MAP = {
 	'MINUTE_1':  ['MINUTE_1',  'MINUTE_5',  'MINUTE_15'],
@@ -97,7 +98,7 @@ async function runAllCycles() {
 	}
 
 	if (allData.length === 0) {
-		await sendCycleSummary([])
+		await sendCycleSummary([], RUN_NUMBER)
 		return
 	}
 
@@ -180,7 +181,7 @@ async function runAllCycles() {
 		results.push(cycleReport)
 	}
 
-	await sendCycleSummary(results)
+	await sendCycleSummary(results, RUN_NUMBER)
 
 	try {
 		const positions = await getOpenPositions()

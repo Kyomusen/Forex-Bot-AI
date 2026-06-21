@@ -17,8 +17,10 @@ function loadKnowledge() {
 function syncTradeResults(history, openDealIds) {
 	let updated = false
 	for (const trade of history) {
-		if (!trade.dealId || trade.result) continue
+		if (!trade.dealId || trade.result === 'WIN' || trade.result === 'LOSS') continue
 		if (!openDealIds.has(trade.dealId)) {
+			// position ปิดแล้ว แต่ยังไม่รู้ผล — mark เป็น UNKNOWN
+			// WIN/LOSS จะถูก set จาก updateTradeResult() เมื่อรู้ผลจาก history API
 			trade.result = 'CLOSED'
 			updated = true
 		}
@@ -35,67 +37,47 @@ function extractPatterns(history) {
 	const total = closed.length
 	const winrate = ((wins.length / total) * 100).toFixed(1)
 
-	const summary = {
-		total,
-		wins: wins.length,
-		losses: losses.length,
-		winrate,
-	}
-
+	const summary = { total, wins: wins.length, losses: losses.length, winrate }
 	const patterns = []
 
-	function addPattern(label, group, totalGroup, type) {
-		if (group.length + totalGroup.length < 2) return
-		const rate = group.length / (group.length + totalGroup.length)
-		const threshold = type === 'good' ? 0.6 : 0.4
-		if (rate >= threshold || rate <= 1 - threshold) {
-			patterns.push({
-				label,
-				winRate: parseFloat((rate * 100).toFixed(0)),
-				wins: group.length,
-				losses: totalGroup.length,
-				type: rate >= 0.6 ? 'positive' : 'negative',
-			})
-		}
+	function addPattern(label, groupWins, groupLosses) {
+		const total = groupWins.length + groupLosses.length
+		if (total < 2) return
+		const rate = groupWins.length / total
+		patterns.push({
+			label,
+			winRate: parseFloat((rate * 100).toFixed(0)),
+			wins: groupWins.length,
+			losses: groupLosses.length,
+			type: rate >= 0.6 ? 'positive' : rate <= 0.4 ? 'negative' : 'neutral',
+		})
 	}
 
 	const symbols = [...new Set(closed.map(t => t.symbol))]
-
 	for (const sym of symbols) {
 		const symClosed = closed.filter(t => t.symbol === sym)
 		const symWins = symClosed.filter(t => t.result === 'WIN')
 		const symLosses = symClosed.filter(t => t.result === 'LOSS')
-		const symRate = symWins.length / symClosed.length
-		patterns.push({
-			label: `${sym} overall`,
-			winRate: parseFloat((symRate * 100).toFixed(0)),
-			wins: symWins.length,
-			losses: symLosses.length,
-			type: symRate >= 0.6 ? 'positive' : symRate <= 0.4 ? 'negative' : 'neutral',
-		})
+		addPattern(`${sym} overall`, symWins, symLosses)
 
-		const symActions = [...new Set(symClosed.map(t => t.action))]
-		for (const act of symActions) {
+		for (const act of ['BUY', 'SELL']) {
 			const actTrades = symClosed.filter(t => t.action === act)
-			const actWins = actTrades.filter(t => t.result === 'WIN')
-			addPattern(`${sym} ${act}`, actWins, actTrades.filter(t => t.result === 'LOSS'), 'good')
+			addPattern(`${sym} ${act}`, actTrades.filter(t => t.result === 'WIN'), actTrades.filter(t => t.result === 'LOSS'))
 		}
 	}
 
-	const emaPatterns = [...new Set(closed.map(t => t.indicators?.emaTrend).filter(Boolean))]
-	for (const trend of emaPatterns) {
+	for (const trend of ['bullish', 'bearish']) {
 		const trendTrades = closed.filter(t => t.indicators?.emaTrend === trend)
-		const trendWins = trendTrades.filter(t => t.result === 'WIN')
-		addPattern(`EMA ${trend}`, trendWins, trendTrades.filter(t => t.result === 'LOSS'), 'good')
+		addPattern(`EMA ${trend}`, trendTrades.filter(t => t.result === 'WIN'), trendTrades.filter(t => t.result === 'LOSS'))
 	}
 
-	for (const rsiThreshold of [70, 30]) {
-		const isHigh = rsiThreshold === 70
-		const rsiTrades = closed.filter(t => t.indicators?.rsi !== undefined &&
-			(isHigh ? t.indicators.rsi > rsiThreshold : t.indicators.rsi < rsiThreshold))
-		if (rsiTrades.length >= 2) {
-			const rsiWins = rsiTrades.filter(t => t.result === 'WIN')
-			addPattern(`RSI ${isHigh ? '>' : '<'} ${rsiThreshold}`, rsiWins, rsiTrades.filter(t => t.result === 'LOSS'), 'good')
+	for (const [label, filterFn] of [
+		['RSI > 70', t => t.indicators?.rsi > 70],
+		['RSI < 30', t => t.indicators?.rsi < 30],
+	]) {
+		const group = closed.filter(filterFn)
+		if (group.length >= 2) {
+			addPattern(label, group.filter(t => t.result === 'WIN'), group.filter(t => t.result === 'LOSS'))
 		}
 	}
 
@@ -113,8 +95,8 @@ function buildKnowledgeMd(history) {
 	lines.push('')
 	lines.push('## 📊 สถิติรวม')
 	lines.push('')
-	lines.push(`| รายการ | จำนวน |`)
-	lines.push(`|--------|------:|`)
+	lines.push('| รายการ | จำนวน |')
+	lines.push('|--------|------:|')
 	lines.push(`| เทรดทั้งหมด | ${summary.total} |`)
 	lines.push(`| ชนะ (WIN) | ${summary.wins} |`)
 	lines.push(`| แพ้ (LOSS) | ${summary.losses} |`)
@@ -148,19 +130,11 @@ function buildKnowledgeMd(history) {
 
 	lines.push('## 📝 กฎที่สรุปได้')
 	lines.push('')
-	if (positive.length > 0) {
-		for (const p of positive.slice(0, 5)) {
-			if (p.winRate >= 70) {
-				lines.push(`- ✅ **${p.label}**: มีแนวโน้มชนะสูง (${p.winRate}%) — ควรให้ความสำคัญ`)
-			}
-		}
+	for (const p of positive.filter(p => p.winRate >= 70).slice(0, 5)) {
+		lines.push(`- ✅ **${p.label}**: มีแนวโน้มชนะสูง (${p.winRate}%) — ควรให้ความสำคัญ`)
 	}
-	if (negative.length > 0) {
-		for (const p of negative.slice(0, 5)) {
-			if (p.winRate <= 30) {
-				lines.push(`- ❌ **${p.label}**: มีแนวโน้มแพ้สูง (${100 - p.winRate}%) — ควรหลีกเลี่ยง`)
-			}
-		}
+	for (const p of negative.filter(p => p.winRate <= 30).slice(0, 5)) {
+		lines.push(`- ❌ **${p.label}**: มีแนวโน้มแพ้สูง (${100 - p.winRate}%) — ควรหลีกเลี่ยง`)
 	}
 	if (positive.length === 0 && negative.length === 0) {
 		lines.push('- ยังมีข้อมูลไม่พอสรุปกฎ ต้องเทรดเพิ่มอีก')

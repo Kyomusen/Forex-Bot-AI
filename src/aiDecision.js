@@ -4,7 +4,7 @@ import dotenv from 'dotenv'
 dotenv.config()
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite-preview' })
+const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' })
 
 function buildBatchPrompt(allData, learningHistory, knowledgeMd) {
 	const assetsPrompt = allData.map(({ symbol, indicators }) => {
@@ -26,16 +26,21 @@ ATR: ${ind.atr?.toFixed(5)}`
 			`  ${t.action} → ${t.result} | confidence: ${t.confidence} | trend: ${t.trend_alignment} | reason: ${t.reason}${t.entry_indicator ? ` | RSI:${t.entry_indicator.rsi} EMA:${t.entry_indicator.ema_trend} MACD:${t.entry_indicator.macd_histogram_trend}` : ''}`
 		).join('\n')
 
+		const lesson = learningHistory.lesson
+		const winRateTrend = typeof lesson === 'object' ? lesson.winRateTrend : 'unknown'
+		const winPatterns = typeof lesson === 'object' ? lesson.winPatterns : []
+		const lossPatterns = typeof lesson === 'object' ? lesson.lossPatterns : []
+
 		learningSection = `
 === การเรียนรู้จากอดีต ===
 สถิติ: ${learningHistory.total} เทรด | Winrate: ${learningHistory.winrate}% (Wins: ${learningHistory.wins} / Losses: ${learningHistory.losses})
-แนวโน้ม: ${learningHistory.lesson.winRateTrend === 'positive' ? 'กำลังดีขึ้น' : 'ต้องระวัง'}
+แนวโน้ม: ${winRateTrend === 'positive' ? 'กำลังดีขึ้น' : 'ต้องระวัง'}
 
 รายละเอียด ${learningHistory.recent.length} เทรดล่าสุด:
 ${recentDetail}
 
-${learningHistory.lesson.winPatterns.length > 0 ? `\nรูปแบบที่เคยได้กำไร:\n${learningHistory.lesson.winPatterns.map(r => `- ${r}`).join('\n')}` : ''}
-${learningHistory.lesson.lossPatterns.length > 0 ? `\nรูปแบบที่เคยขาดทุน:\n${learningHistory.lesson.lossPatterns.map(r => `- ${r}`).join('\n')}` : ''}
+${winPatterns.length > 0 ? `\nรูปแบบที่เคยได้กำไร:\n${winPatterns.map(r => `- ${r}`).join('\n')}` : ''}
+${lossPatterns.length > 0 ? `\nรูปแบบที่เคยขาดทุน:\n${lossPatterns.map(r => `- ${r}`).join('\n')}` : ''}
 
 ⚠️ วิเคราะห์ด้วยว่าครั้งที่แล้วคุณตัดสินใจอะไรผิดหรือถูก แล้วปรับการตัดสินใจรอบนี้ให้ดีขึ้น`
 	} else {
@@ -54,6 +59,7 @@ ${short}`
 คุณคือ AI เทรด Forex ผู้เชี่ยวชาญ วิเคราะห์ตลาดหลายสินทรัพย์พร้อมกัน
 ${assetsPrompt}
 ${learningSection}
+${knowledgeSection}
 
 ตอบเป็น JSON ARRAY เท่านั้น (ไม่ต้องใส่ backticks):
 [
@@ -76,6 +82,7 @@ async function getAIDecision(allData, learningHistory, knowledgeMd) {
 
 	for (const { symbol, charts } of allData) {
 		for (const [tf, buffer] of Object.entries(charts)) {
+			parts.push({ text: `\nChart ของ ${symbol} - ${tf}:` })
 			parts.push({
 				inlineData: {
 					mimeType: 'image/png',
@@ -96,7 +103,11 @@ async function getAIDecision(allData, learningHistory, knowledgeMd) {
 		return allData.map(d => ({
 			symbol: d.symbol,
 			action: 'HOLD',
-			reason: 'AI parse error'
+			sl_pips: null,
+			tp_pips: null,
+			confidence: 0,
+			trend_alignment: 'conflicted',
+			reason: 'AI parse error — fallback HOLD',
 		}))
 	}
 }

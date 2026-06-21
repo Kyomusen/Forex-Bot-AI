@@ -43,11 +43,30 @@ function addTrade({ dealId, symbol, action, confidence, trend_alignment, reason,
 	saveHistory(trimmed)
 }
 
+function buildLesson(closed) {
+	if (closed.length < 3) {
+		return {
+			winPatterns: [],
+			lossPatterns: [],
+			winRateTrend: 'unknown',
+		}
+	}
+
+	const wins = closed.filter(t => t.result === 'WIN')
+	const losses = closed.filter(t => t.result === 'LOSS')
+
+	return {
+		winPatterns: wins.map(t => t.reason).filter(Boolean),
+		lossPatterns: losses.map(t => t.reason).filter(Boolean),
+		winRateTrend: wins.length >= losses.length ? 'positive' : 'negative',
+	}
+}
+
 function getLearningHistory() {
 	const history = loadHistory()
 	if (history.length === 0) return null
 
-	const closed = history.filter(t => t.result !== undefined)
+	const closed = history.filter(t => t.result === 'WIN' || t.result === 'LOSS')
 	const wins = closed.filter(t => t.result === 'WIN')
 	const losses = closed.filter(t => t.result === 'LOSS')
 	const total = closed.length
@@ -78,22 +97,6 @@ function getLearningHistory() {
 		winrate,
 		recent: learningData,
 		lesson: buildLesson(closed),
-	}
-}
-
-function buildLesson(closed) {
-	if (closed.length < 3) return 'ข้อมูลยังน้อยเกินไปสำหรับการวิเคราะห์'
-
-	const wins = closed.filter(t => t.result === 'WIN')
-	const losses = closed.filter(t => t.result === 'LOSS')
-
-	const winReasons = wins.map(t => t.reason).filter(Boolean)
-	const lossReasons = losses.map(t => t.reason).filter(Boolean)
-
-	return {
-		winPatterns: winReasons,
-		lossPatterns: lossReasons,
-		winRateTrend: wins.length >= losses.length ? 'positive' : 'negative',
 	}
 }
 

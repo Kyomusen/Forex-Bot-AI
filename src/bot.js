@@ -1,6 +1,6 @@
 import cron from 'node-cron'
 import dotenv from 'dotenv'
-import { createSession, getCandles } from './capitalClient.js'
+import { createSession, getCandles, getOpenPositions } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
 import { getAIDecision } from './aiDecision.js'
 import { buildOrderParams } from './riskManager.js'
@@ -10,82 +10,99 @@ import { addTrade, getLearningHistory, loadHistory, saveHistory } from './tradeH
 import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
-import { getOpenPositions } from './capitalClient.js'
 
 dotenv.config()
 
 const SYMBOLS = (process.env.SYMBOLS ?? 'EURUSD').split(',')
 const ACCOUNT_BALANCE = parseFloat(process.env.ACCOUNT_BALANCE ?? '1000')
-
-// Configuration for synchronized multi-timeframe analysis
 const PRIMARY_TIMEFRAME = process.env.TIMEFRAME ?? 'MINUTE_15'
 
-// Dynamic mapping of primary TF to secondary/tertiary TFs
 const TF_MAP = {
-	'MINUTE_1':  ['MINUTE_1', 'MINUTE_5', 'MINUTE_15'],
-	'MINUTE_5':  ['MINUTE_5', 'MINUTE_15', 'HOUR'],
-	'MINUTE_15': ['MINUTE_15', 'HOUR', 'HOUR_4'],
-	'MINUTE_30': ['MINUTE_30', 'HOUR', 'HOUR_4'],
-	'HOUR':      ['HOUR', 'HOUR_4', 'DAY'],
+	'MINUTE_1':  ['MINUTE_1',  'MINUTE_5',  'MINUTE_15'],
+	'MINUTE_5':  ['MINUTE_5',  'MINUTE_15', 'HOUR'],
+	'MINUTE_15': ['MINUTE_15', 'HOUR',      'HOUR_4'],
+	'MINUTE_30': ['MINUTE_30', 'HOUR',      'HOUR_4'],
+	'HOUR':      ['HOUR',      'HOUR_4',    'DAY'],
 }
 
 const CRON_MAP = {
-	'MINUTE_1': '*/1 * * * *',
-	'MINUTE_5': '*/5 * * * *',
+	'MINUTE_1':  '*/1 * * * *',
+	'MINUTE_5':  '*/5 * * * *',
 	'MINUTE_15': '*/15 * * * *',
 	'MINUTE_30': '*/30 * * * *',
-	'HOUR': '0 * * * *',
+	'HOUR':      '0 * * * *',
+}
+
+const TF_LABEL_MAP = {
+	'MINUTE_1':  '1m',
+	'MINUTE_5':  '5m',
+	'MINUTE_15': '15m',
+	'MINUTE_30': '30m',
+	'HOUR':      '1H',
+	'HOUR_4':    '4H',
+	'DAY':       '1D',
 }
 
 const CRON_SCHEDULE = CRON_MAP[PRIMARY_TIMEFRAME] ?? '*/15 * * * *'
-
 const SELECTED_TFS = TF_MAP[PRIMARY_TIMEFRAME] ?? ['MINUTE_15', 'HOUR', 'HOUR_4']
 
 const TIMEFRAMES = SELECTED_TFS.map(tf => ({
-	tf: tf,
-	label: tf.replace('MINUTE_', '').replace('HOUR', '1H').replace('DAY', '1D').replace('4H', '4H') // Simplify labels
+	tf,
+	label: TF_LABEL_MAP[tf] ?? tf,
 }))
 
 async function runAllCycles() {
+	console.log(`\n[Bot] ===== รอบใหม่ ${new Date().toISOString()} =====`)
+
 	const allData = []
+
 	for (const symbol of SYMBOLS) {
 		console.log(`[Bot] ${symbol} ดึง candle data...`)
 		const candleMap = {}
 		let valid = true
+
 		for (const { tf, label } of TIMEFRAMES) {
 			const cached = getCached({ symbol, tf, candles: [] })
 			const hasCache = cached && cached.length >= 60
 			const fetchCount = hasCache ? REFRESH_FETCH : INITIAL_FETCH
 			const raw = await getCandles(symbol, tf, fetchCount)
-			if (!raw || raw.length < fetchCount) {
+
+			if (!raw || raw.length < 10) {
 				console.log(`[Bot] ${symbol} candle ${label} ไม่เพียงพอ`)
 				valid = false
 				break
 			}
+
 			const candles = getCached({ symbol, tf, candles: raw })
+
 			if (!candles || candles.length < 60) {
-				console.log(`[Bot] ${symbol} candle ${label} ยังไม่เพียงพอ (${candles?.length ?? 0})`)
+				console.log(`[Bot] ${symbol} candle ${label} ยังไม่เพียงพอ (${candles?.length ?? 0}) — รอรอบหน้า`)
 				valid = false
 				break
 			}
+
 			candleMap[label] = candles
 		}
+
 		if (!valid) continue
 
 		const multiTFIndicators = getMultiTFIndicators(candleMap)
+
 		const chartBuffers = {}
 		for (const [label, candles] of Object.entries(candleMap)) {
 			chartBuffers[label] = await renderChart(candles, label)
 		}
-		
+
 		allData.push({ symbol, indicators: multiTFIndicators, charts: chartBuffers })
 	}
 
-	if (allData.length === 0) return
+	if (allData.length === 0) {
+		await sendCycleSummary([])
+		return
+	}
 
-	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์ในรอบเดียว...')
-	// Note: You will need to update getAIDecision to handle an array of symbols
-	const decisions = await getAIDecision(allData, getLearningHistory(), loadKnowledge()) 
+	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์...')
+	const decisions = await getAIDecision(allData, getLearningHistory(), loadKnowledge())
 	console.log('[Bot] AI decisions received')
 
 	const results = []
@@ -93,9 +110,8 @@ async function runAllCycles() {
 	for (const decision of decisions) {
 		const symbol = decision.symbol
 		const symbolData = allData.find(d => d.symbol === symbol)
-		
-		let cycleReport = { ...decision, status: decision.status ?? 'OK', symbol }
-		
+		const cycleReport = { ...decision, status: 'OK', symbol }
+
 		try {
 			const alreadyOpen = await hasOpenPosition(symbol)
 			if (alreadyOpen) {
@@ -116,7 +132,7 @@ async function runAllCycles() {
 					decision,
 					indicators: primaryIndicators,
 					accountBalance: ACCOUNT_BALANCE,
-					symbol: symbol,
+					symbol,
 				})
 
 				if (orderParams) {
@@ -135,17 +151,17 @@ async function runAllCycles() {
 							tp_pips: decision.tp_pips,
 							indicators: primaryIndicators,
 						})
-						await sendOrderNotification({ 
+						await sendOrderNotification({
 							action: decision.action,
-							symbol: symbol,
+							symbol,
 							size: orderParams.size,
-							entry: symbolData.indicators[TIMEFRAMES[0].label].currentPrice,
+							entry: primaryIndicators.currentPrice,
 							sl: orderParams.stopLevel,
 							tp: orderParams.profitLevel,
 							confidence: decision.confidence,
 							reason: decision.reason,
 							trend_alignment: decision.trend_alignment,
-							chartBuffers: symbolData.charts
+							chartBuffers: symbolData.charts,
 						})
 					} else {
 						cycleReport.status = 'ERROR'
@@ -160,12 +176,12 @@ async function runAllCycles() {
 			cycleReport.status = 'ERROR'
 			cycleReport.reason = err.message
 		}
+
 		results.push(cycleReport)
 	}
 
 	await sendCycleSummary(results)
 
-	// Self-learning: sync closed trades and update knowledge
 	try {
 		const positions = await getOpenPositions()
 		const openDealIds = new Set((positions ?? []).map(p => p.position?.dealId).filter(Boolean))
@@ -183,10 +199,9 @@ async function runAllCycles() {
 async function start() {
 	console.log('[Bot] 🚀 Forex Bot เริ่มทำงาน')
 	console.log(`[Bot] Symbols: ${SYMBOLS.join(', ')} | Balance: $${ACCOUNT_BALANCE}`)
-	console.log(`[Bot] Timeframes: ${TIMEFRAMES.map(t => t.label).join(', ')}`)
+	console.log(`[Bot] Primary TF: ${PRIMARY_TIMEFRAME} | Timeframes: ${TIMEFRAMES.map(t => t.label).join(', ')}`)
 	console.log(`[Bot] Cron: ${CRON_SCHEDULE}`)
 
-	console.log('[Bot] กำลัง login Capital.com...')
 	await createSession()
 
 	await runAllCycles()
@@ -207,5 +222,3 @@ start().catch(async err => {
 	await sendErrorNotification(`fatal error: ${err.message}`)
 	process.exit(1)
 })
-
-

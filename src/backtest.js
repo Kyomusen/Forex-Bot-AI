@@ -49,17 +49,62 @@ function canCallAI() {
 	return recent.length <= 15
 }
 
-function ruleDecision(indicators) {
+function atrPips(atr, symbol) {
+	if (!atr || atr <= 0) return { sl: SL_PIPS_DEFAULT, tp: TP_PIPS_DEFAULT }
+	const pip = pipToPrice(1, symbol)
+	const atrInPips = Math.round(atr / pip)
+	const sl = Math.max(15, Math.round(atrInPips * 1.5))
+	const tp = Math.max(25, Math.round(sl * 2))
+	return { sl, tp }
+}
+
+function ruleDecision(indicators, symbol) {
 	const ind = Object.values(indicators)[0]
 	if (!ind) return { action: 'HOLD', confidence: 0, sl_pips: null, tp_pips: null, reason: 'no data' }
-	const { rsi, emaTrend } = ind
+
+	const { rsi, ema20, ema50, emaTrend, macd, atr, currentPrice } = ind
 	if (rsi == null) return { action: 'HOLD', confidence: 0, sl_pips: null, tp_pips: null, reason: 'no RSI' }
 
-	if (rsi < 30 && emaTrend === 'bullish')
-		return { action: 'BUY', confidence: 0.6, sl_pips: SL_PIPS_DEFAULT, tp_pips: TP_PIPS_DEFAULT, reason: `RSI ${rsi.toFixed(1)} oversold + ${emaTrend}` }
-	if (rsi > 70 && emaTrend === 'bearish')
-		return { action: 'SELL', confidence: 0.6, sl_pips: SL_PIPS_DEFAULT, tp_pips: TP_PIPS_DEFAULT, reason: `RSI ${rsi.toFixed(1)} overbought + ${emaTrend}` }
-	return { action: 'HOLD', confidence: 0.3, sl_pips: null, tp_pips: null, reason: `RSI ${rsi.toFixed(1)} ${emaTrend}` }
+	const { sl, tp } = atrPips(atr, symbol)
+	const aboveEma20 = currentPrice && ema20 ? currentPrice > ema20 : false
+	const belowEma20 = currentPrice && ema20 ? currentPrice < ema20 : false
+	const aboveEma50 = currentPrice && ema50 ? currentPrice > ema50 : false
+	const belowEma50 = currentPrice && ema50 ? currentPrice < ema50 : false
+	const nearEma20 = currentPrice && ema20 ? Math.abs(currentPrice - ema20) / ema20 < 0.003 : false
+	const macdCrossoverBull = macd?.histogram > 0 && macd?.macd > macd?.signal
+	const macdCrossoverBear = macd?.histogram < 0 && macd?.macd < macd?.signal
+	const macdHistPositive = macd?.histogramTrend === 'positive'
+	const macdHistNegative = macd?.histogramTrend === 'negative'
+
+	const signals = []
+
+	const uptrend = emaTrend === 'bullish' && aboveEma50
+	const downtrend = emaTrend === 'bearish' && belowEma50
+
+	// --- BUY (uptrend + MACD confirmation) ---
+	if (uptrend && macdHistPositive) {
+		if (rsi < 45)
+			signals.push({ action: 'BUY', confidence: 0.7, sl_pips: sl, tp_pips: tp, reason: `RSI ${rsi.toFixed(1)} oversold uptrend` })
+		else if (nearEma20 && rsi < 55)
+			signals.push({ action: 'BUY', confidence: 0.65, sl_pips: sl, tp_pips: tp, reason: `Pullback EMA20 RSI ${rsi.toFixed(1)}` })
+		else if (aboveEma20 && rsi > 50)
+			signals.push({ action: 'BUY', confidence: 0.6, sl_pips: sl, tp_pips: tp, reason: `Momentum RSI ${rsi.toFixed(1)}` })
+	}
+
+	// --- SELL (downtrend + MACD confirmation) ---
+	if (downtrend && macdHistNegative) {
+		if (rsi > 55)
+			signals.push({ action: 'SELL', confidence: 0.7, sl_pips: sl, tp_pips: tp, reason: `RSI ${rsi.toFixed(1)} overbought downtrend` })
+		else if (nearEma20 && rsi > 45)
+			signals.push({ action: 'SELL', confidence: 0.65, sl_pips: sl, tp_pips: tp, reason: `Pullback EMA20 RSI ${rsi.toFixed(1)}` })
+		else if (belowEma20 && rsi < 50)
+			signals.push({ action: 'SELL', confidence: 0.6, sl_pips: sl, tp_pips: tp, reason: `Momentum RSI ${rsi.toFixed(1)}` })
+	}
+
+	if (signals.length > 0) {
+		return signals.reduce((a, b) => a.confidence >= b.confidence ? a : b)
+	}
+	return { action: 'HOLD', confidence: 0.3, sl_pips: null, tp_pips: null, reason: `RSI ${rsi.toFixed(1)} ${emaTrend} MACD ${macd?.histogramTrend}` }
 }
 
 async function runBacktest() {
@@ -99,7 +144,7 @@ async function runBacktest() {
 		trades[sym] = []
 	}
 
-	const startIdx = 60
+	const startIdx = 50
 	for (let i = startIdx; i < minLen; i++) {
 		for (const sym of activeSymbols) {
 			const candles = allCandles[sym]
@@ -114,7 +159,7 @@ async function runBacktest() {
 					const pnlPips = (result.price - pos.entry) / pipToPrice(1, sym)
 					const pnl = pnlPips * pos.size * (pipToPrice(1, sym) * 100000) * multiplier
 					balances[sym] += pnl
-					trades[sym].push({ ...pos, exit: result.price, pnl: parseFloat(pnl.toFixed(2)), result: result.type === 'TP' ? 'WIN' : 'LOSS', exitTime: result.at, bars: i - pos.entryIdx })
+					trades[sym].push({ ...pos, exit: result.price, pnl: parseFloat(pnl.toFixed(2)), result: pnl >= 0 ? 'WIN' : 'LOSS', exitTime: result.at, bars: i - pos.entryIdx })
 					positions[sym] = null
 					const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
 					if (currentTotal > peakTotal) peakTotal = currentTotal
@@ -144,21 +189,23 @@ async function runBacktest() {
 					aiCallsUsed++
 				} catch (err) {
 					console.warn(`[Backtest] ${sym} AI error: ${err.message}`)
-					decision = ruleDecision(indicators)
+					decision = ruleDecision(indicators, sym)
 				}
 			} else {
-				decision = ruleDecision(indicators)
+				decision = ruleDecision(indicators, sym)
 			}
 
 			if (!decision || decision.action === 'HOLD') continue
 
 			const slPips = decision.sl_pips ?? SL_PIPS_DEFAULT
-			const tpPips = decision.tp_pips ?? TP_PIPS_DEFAULT
+			const tpPips = decision.tp_pips
 			const size = calcSize(balances[sym], price, slPips, sym)
 			if (size <= 0) continue
 
-			const sl = decision.action === 'BUY' ? price - pipToPrice(slPips, sym) : price + pipToPrice(slPips, sym)
-			const tp = decision.action === 'BUY' ? price + pipToPrice(tpPips, sym) : price - pipToPrice(tpPips, sym)
+			const slOffset = pipToPrice(slPips, sym)
+			const tpOffset = pipToPrice(tpPips, sym)
+			const sl = decision.action === 'BUY' ? price - slOffset : price + slOffset
+			const tp = decision.action === 'BUY' ? price + tpOffset : price - tpOffset
 
 			positions[sym] = { symbol: sym, type: decision.action, entry: price, sl, tp, size, confidence: decision.confidence, reason: decision.reason, entryTime: current.snapshotTime ?? i, entryIdx: i }
 

@@ -2,7 +2,7 @@ import cron from 'node-cron'
 import dotenv from 'dotenv'
 import { createSession, getCandles, getOpenPositions } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
-import { getAIDecision } from './aiDecision.js'
+import { getAIConditionalOrders } from './aiDecision.js'
 import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition } from './orderManager.js'
 import { renderChart } from './chartRenderer.js'
@@ -11,6 +11,7 @@ import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from '
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
 import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
+import { loadPending, savePending, executePendingOrders, cleanExpired } from './pendingOrders.js'
 
 dotenv.config()
 
@@ -57,6 +58,75 @@ const TIMEFRAMES = SELECTED_TFS.map(tf => ({
 async function runAllCycles() {
 	console.log(`\n[Bot] ===== รอบใหม่ ${new Date().toISOString()} =====`)
 
+	// Phase 1: Execute pending orders (fast, no AI)
+	console.log('[Bot] Phase 1: ตรวจสอบ Pending Orders...')
+	const allPending = cleanExpired(loadPending())
+	if (allPending.length > 0) {
+		const { executed, remaining } = executePendingOrders(allPending)
+		for (const order of executed) {
+			console.log(`[Bot] 🎯 ${order.symbol} เงื่อนไขตรง! ${order.entry_condition} (price=${order.triggeredPrice})`)
+			try {
+				const alreadyOpen = await hasOpenPosition(order.symbol)
+				if (alreadyOpen) {
+					console.log(`[Bot] ${order.symbol} มี position แล้ว — ข้าม`)
+					continue
+				}
+				const currentPrice = order.triggeredPrice
+				const orderParams = buildOrderParams({
+					decision: {
+						action: order.action,
+						sl_pips: order.sl_pips,
+						tp_pips: order.tp_pips,
+						confidence: order.confidence || 0.7,
+					},
+					indicators: { currentPrice },
+					accountBalance: ACCOUNT_BALANCE,
+					symbol: order.symbol,
+				})
+				if (orderParams) {
+					let result
+					if (PAPER_TRADING) {
+						result = { dealReference: `paper-${Date.now()}-${order.symbol}` }
+						console.log(`[Bot] ${order.symbol} 📝 PAPER — ${order.action}`)
+					} else {
+						result = await placeOrder(orderParams)
+					}
+					if (result) {
+						addTrade({
+							dealId: result.dealReference ?? null,
+							symbol: order.symbol,
+							action: order.action,
+							confidence: order.confidence || 0.7,
+							reason: `Pending: ${order.reason || order.entry_condition}`,
+							entry: currentPrice,
+							sl_pips: order.sl_pips,
+							tp_pips: order.tp_pips,
+							paper: PAPER_TRADING || undefined,
+						})
+						await sendOrderNotification({
+							action: order.action,
+							symbol: order.symbol,
+							size: orderParams.size,
+							entry: currentPrice,
+							sl: orderParams.stopLevel,
+							tp: orderParams.profitLevel,
+							confidence: order.confidence || 0.7,
+							reason: `Pending trigger: ${order.reason || order.entry_condition}`,
+							trend_alignment: 'aligned',
+							paper: PAPER_TRADING,
+						})
+					}
+				}
+			} catch (err) {
+				console.error(`[Bot] ${order.symbol} execute error:`, err.message)
+			}
+		}
+		savePending(remaining)
+		console.log(`[Bot] Pending: ${executed.length} executed, ${remaining.length} remaining`)
+	}
+
+	// Phase 2: AI วิเคราะห์ — สร้าง pending orders ใหม่
+	console.log('[Bot] Phase 2: ดึงข้อมูลตลาดให้ AI วิเคราะห์...')
 	const allData = []
 
 	for (const symbol of SYMBOLS) {
@@ -104,120 +174,50 @@ async function runAllCycles() {
 		return
 	}
 
-	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์...')
-	const decisions = await getAIDecision(allData, getLearningHistory(), loadKnowledge())
-	console.log('[Bot] AI decisions received')
+	console.log('[Bot] ถาม AI เพื่อวาง Pending Orders...')
+	const aiOrders = await getAIConditionalOrders(allData, getLearningHistory(), loadKnowledge())
+	console.log(`[Bot] AI สร้าง ${aiOrders.length} pending orders`)
 
-	for (const d of decisions) {
-		if (d.action === 'HOLD' || d.trend_alignment === 'conflicted' || !d.action) {
-			const symbolData = allData.find(x => x.symbol === d.symbol)
-			if (symbolData) {
-				const primaryIndicators = symbolData.indicators[TIMEFRAMES[0].label]
-				const h4Indicators = symbolData.indicators[TIMEFRAMES[2]?.label]
-				const h4Trend = h4Indicators?.emaTrend || 'neutral'
-				const ruleDecision = strategyEval({
-					symbol: d.symbol,
-					h4Trend,
-					ind: primaryIndicators,
-					knowledge: false,
-				})
-				if (ruleDecision) {
-					d.action = ruleDecision.action
-					d.sl_pips = ruleDecision.slPips
-					d.tp_pips = ruleDecision.tpPips
-					d.confidence = ruleDecision.confidence
-					d.reason = `Rule-based ${ruleDecision.setup} (RSI-based)`
-					d.trend_alignment = 'aligned'
-				}
-			}
+	const remaining = loadPending()
+	const merged = [...remaining]
+	for (const order of aiOrders) {
+		const existing = merged.find(o => o.symbol === order.symbol && o.action === order.action)
+		if (existing) {
+			Object.assign(existing, {
+				entry_condition: order.entry_condition,
+				entry_price: order.entry_price,
+				sl_pips: order.sl_pips,
+				tp_pips: order.tp_pips,
+				confidence: order.confidence,
+				reason: order.reason,
+				created_at: new Date().toISOString(),
+			})
+		} else {
+			merged.push({
+				symbol: order.symbol,
+				action: order.action,
+				entry_condition: order.entry_condition,
+				entry_price: order.entry_price,
+				sl_pips: order.sl_pips,
+				tp_pips: order.tp_pips,
+				confidence: order.confidence,
+				reason: order.reason,
+				created_at: new Date().toISOString(),
+			})
 		}
 	}
+	savePending(merged)
+	console.log(`[Bot] บันทึก ${merged.length} pending orders เรียบร้อย`)
 
-	const results = []
+	await sendCycleSummary(aiOrders.map(o => ({
+		action: o.action,
+		symbol: o.symbol,
+		status: 'PENDING',
+		reason: `${o.entry_condition} — ${o.reason || ''}`,
+		confidence: o.confidence,
+	})), RUN_NUMBER)
 
-	for (const decision of decisions) {
-		const symbol = decision.symbol
-		const symbolData = allData.find(d => d.symbol === symbol)
-		const cycleReport = { ...decision, status: 'OK', symbol, aiAnalysis: decision.reason, paper: PAPER_TRADING || undefined }
-
-		try {
-			const alreadyOpen = await hasOpenPosition(symbol)
-			if (alreadyOpen) {
-				cycleReport.action = 'HOLD'
-				cycleReport.reason = 'มี Position เปิดอยู่แล้ว'
-				results.push(cycleReport)
-				continue
-			}
-
-			if (decision.action === 'HOLD') {
-				console.log(`[Bot] ${symbol} AI บอก HOLD — ${decision.reason}`)
-			} else if (decision.trend_alignment === 'conflicted') {
-				console.log(`[Bot] ${symbol} trend ขัดแย้งกัน — ไม่เปิด order`)
-				cycleReport.reason = 'trend ขัดแย้งกัน'
-			} else {
-				const primaryIndicators = symbolData.indicators[TIMEFRAMES[0].label]
-				const orderParams = buildOrderParams({
-					decision,
-					indicators: primaryIndicators,
-					accountBalance: ACCOUNT_BALANCE,
-					symbol,
-				})
-
-				if (orderParams) {
-					let result
-					if (PAPER_TRADING) {
-						result = { dealReference: `paper-${Date.now()}-${symbol}` }
-						console.log(`[Bot] ${symbol} 📝 PAPER — จำลอง ${decision.action}`)
-					} else {
-						result = await placeOrder(orderParams)
-					}
-					if (result) {
-						console.log(`[Bot] ${symbol} ✅ เปิด ${decision.action} สำเร็จ${PAPER_TRADING ? ' (PAPER)' : ''}`)
-						addTrade({
-							dealId: result.dealReference ?? null,
-							symbol,
-							action: decision.action,
-							confidence: decision.confidence,
-							trend_alignment: decision.trend_alignment,
-							reason: decision.reason,
-							entry: primaryIndicators.currentPrice,
-							sl_pips: decision.sl_pips,
-							tp_pips: decision.tp_pips,
-							indicators: primaryIndicators,
-							paper: PAPER_TRADING || undefined,
-						})
-						await sendOrderNotification({
-							action: decision.action,
-							symbol,
-							size: orderParams.size,
-							entry: primaryIndicators.currentPrice,
-							sl: orderParams.stopLevel,
-							tp: orderParams.profitLevel,
-							confidence: decision.confidence,
-							reason: decision.reason,
-							trend_alignment: decision.trend_alignment,
-							chartBuffers: symbolData.charts,
-							paper: PAPER_TRADING,
-						})
-					} else {
-						cycleReport.status = 'ERROR'
-						cycleReport.reason = 'เปิด order ไม่สำเร็จ'
-					}
-				} else {
-					cycleReport.reason = 'Risk parameters ไม่ผ่าน'
-				}
-			}
-		} catch (err) {
-			console.error(`[Bot] ${symbol} error:`, err.message)
-			cycleReport.status = 'ERROR'
-			cycleReport.reason = err.message
-		}
-
-		results.push(cycleReport)
-	}
-
-	await sendCycleSummary(results, RUN_NUMBER)
-
+	// Sync trade results
 	try {
 		const positions = await getOpenPositions()
 		const openDealIds = new Set((positions ?? []).map(p => p.position?.dealId).filter(Boolean))

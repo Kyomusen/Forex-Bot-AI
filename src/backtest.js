@@ -5,6 +5,7 @@ import { getIndicators, getMultiTFIndicators } from './indicators.js'
 import { getAIDecision } from './aiDecision.js'
 import { sendBacktestReport } from './discordNotifier.js'
 import { recordTrades, shouldSkipSetup, printSummary } from './backtestLearning.js'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
 dotenv.config()
 
@@ -340,7 +341,76 @@ async function runBacktest() {
 	}
 
 	const startIdx = 60
+
+	if (USE_AI) {
+		console.log('[AI] กำลังส่งข้อมูลทั้งหมดให้ Gemini วิเคราะห์...')
+		for (const sym of activeSymbols) {
+			allData[sym].aiDecisions = {}
+		}
+		try {
+			const aiInput = []
+			for (const sym of activeSymbols) {
+				const { h1 } = allData[sym]
+				const candles = h1.slice(0, minLen)
+				const rows = candles.map((c, idx) => {
+					if (idx < 60) return null
+					const t = c.snapshotTime ?? c.snapshotTimeUTC ?? ''
+					const o = typeof c.openPrice === 'number' ? c.openPrice : (c.openPrice?.bid ?? 0)
+					const hi = typeof c.highPrice === 'number' ? c.highPrice : (c.highPrice?.bid ?? 0)
+					const lo = typeof c.lowPrice === 'number' ? c.lowPrice : (c.lowPrice?.bid ?? 0)					
+					const cl = typeof c.closePrice === 'number' ? c.closePrice : (c.closePrice?.bid ?? 0)
+					return `${idx},{${t}},O${o.toFixed(5)},H${hi.toFixed(5)},L${lo.toFixed(5)},C${cl.toFixed(5)}`
+				}).filter(Boolean).join('\n')
+				const window = h1.slice(0, 120)
+				const candleMap = { [TF]: window }
+				const ind = getMultiTFIndicators(candleMap)
+				const mainInd = Object.values(ind)[0]
+				aiInput.push({
+					symbol: sym,
+					price: getPrice(h1[minLen - 1]),
+					indicators: `RSI:${mainInd?.rsi?.toFixed(1)??'?'},MACD:${mainInd?.macd?.macd?.toFixed(2)??'?'},Signal:${mainInd?.macd?.signal?.toFixed(2)??'?'},EMA20:${mainInd?.ema20?.toFixed(2)??'?'},EMA50:${mainInd?.ema50?.toFixed(2)??'?'},ATR:${mainInd?.atr?.toFixed(2)??'?'}`,
+					candleData: `candle_idx,time,open,high,low,close\n${rows}`,
+				})
+			}
+
+			const maxCandle = Math.max(...Object.values(allData).map(d => d.h1.length))
+			const prompt = `You are an expert Forex AI trader. Analyze the candle data below and identify profitable trade signals.
+
+For each symbol, identify specific candle indices where a clear BUY or SELL signal appears based on price action, support/resistance, and trend analysis.
+
+Respond ONLY with a valid JSON array (no markdown):
+[{"candle":0,"symbol":"EURUSD","action":"BUY"|"SELL"},...]
+
+Only include NON-HOLD signals. Candle indices range from 60 to ${maxCandle - 1}. Include the candle index, symbol, and action.`
+
+			const parts = [{ text: prompt }]
+			for (const entry of aiInput) {
+				parts.push({ text: `\n=== ${entry.symbol} ===\nราคาล่าสุด: ${entry.price}\nIndicators: ${entry.indicators}\nCandle data:\n${entry.candleData}` })
+			}
+
+			const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
+			const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' })
+			const result = await model.generateContent({ contents: [{ role: 'user', parts }] })
+			const text = result.response.text()
+			const cleaned = text.replace(/```json|```/g, '').trim()
+			const decisions = JSON.parse(cleaned)
+			if (Array.isArray(decisions)) {
+				for (const d of decisions) {
+					if (d && d.symbol && allData[d.symbol]) {
+						allData[d.symbol].aiDecisions[d.candle] = d.action
+					}
+				}
+			}
+			aiCallsUsed++
+			console.log(`[AI] ได้ ${decisions.length} decisions จาก Gemini`)
+		} catch (err) {
+			console.warn(`[AI] call error: ${err.message}`)
+		}
+	}
+
 	for (let i = startIdx; i < minLen; i++) {
+		const batchData = []
+
 		for (const sym of activeSymbols) {
 			const { h1 } = allData[sym]
 			const current = h1[i]
@@ -380,51 +450,67 @@ async function runBacktest() {
 			if (sw.length >= 20) candleMap[`${TF}_secondary`] = sw
 			const indicators = getMultiTFIndicators(candleMap)
 			const h4Trend = getH4Trend(sym, current.snapshotTime ?? current.snapshotTimeUTC ?? i)
+			batchData.push({ symbol: sym, indicators, charts: {}, h4_trend: h4Trend, price, h1Idx: i })
+		}
 
-			let decision = null
-			if (USE_AI && canCallAI()) {
-				try {
-					const data = [{ symbol: sym, indicators, charts: {}, h4_trend: h4Trend }]
-					const aiDecisions = await getAIDecision(data, null, null)
-					decision = aiDecisions?.[0]
-					aiCallsUsed++
-				} catch (err) {
-					console.warn(`[Backtest] ${sym} AI error: ${err.message}`)
+		for (const sym of activeSymbols) {
+			const { h1 } = allData[sym]
+			const current = h1[i]
+			const price = getPrice(current)
+			const pos = positions[sym]
+			if (pos) continue
+
+			const window = h1.slice(0, i + 1)
+			const sw = h1.slice(Math.max(0, i - 95), i + 1)
+			const candleMap = { [TF]: window }
+			if (sw.length >= 20) candleMap[`${TF}_secondary`] = sw
+			const indicators = getMultiTFIndicators(candleMap)
+			const h4Trend = getH4Trend(sym, current.snapshotTime ?? current.snapshotTimeUTC ?? i)
+
+			const mainInd = Object.values(indicators)[0]
+			if (mainInd) mainInd.currentPrice = price
+
+			let finalAction = null
+			let setupName = ''
+			let entryReason = ''
+			let entryConf = 0
+			if (USE_AI) {
+				const aiAction = allData[sym].aiDecisions?.[i]
+				if (aiAction && (aiAction === 'BUY' || aiAction === 'SELL')) {
+					finalAction = aiAction
+					setupName = 'AI'
 				}
 			}
-
-			if (!decision || decision.action === 'HOLD') {
-				const mainInd = Object.values(indicators)[0]
-				if (mainInd) mainInd.currentPrice = price
-				decision = evaluate({
+			if (!finalAction) {
+				const ruleDecision = evaluate({
 					symbol: sym, h4Trend, ind: mainInd, knowledge: true,
 				})
+				if (!ruleDecision || ruleDecision.action === 'HOLD') continue
+				finalAction = ruleDecision.action
+				setupName = ruleDecision.reason?.slice(0, 30) ?? 'rules'
+				entryReason = ruleDecision.reason
+				entryConf = ruleDecision.confidence
 			}
 
-			if (!decision) continue
+			if (!finalAction) continue
 
-			const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
-			if (isDDDisabled(sym, currentTotal, peakTotal)) continue
+			const ddDisabled = isDDDisabled(sym, balances)
+			if (ddDisabled) continue
 
-			const size = calcSize(balances[sym], decision.slPips, sym)
-			if (size <= 0) continue
-
-			const slOffset = pipToPrice(decision.slPips, sym)
-			const tpOffset = pipToPrice(decision.tpPips, sym)
-			const sl = decision.action === 'BUY' ? price - slOffset : price + slOffset
-			const tp = decision.action === 'BUY' ? price + tpOffset : price - tpOffset
+			const atrVal = mainInd?.atr ?? 0
+			const { slPips, tpPips } = atrParams(atrVal, sym)
+			const entryPrice = price
+			const slPrice = finalAction === 'BUY' ? entryPrice - slPips * pipToPrice(1, sym) : entryPrice + slPips * pipToPrice(1, sym)
+			const tpPrice = finalAction === 'BUY' ? entryPrice + tpPips * pipToPrice(1, sym) : entryPrice - tpPips * pipToPrice(1, sym)
+			const size = calcSize(balances[sym], slPips, sym)
+			if (!size) continue
 
 			positions[sym] = {
-				symbol: sym, type: decision.action, entry: price, sl, tp, size,
-				setup: decision.setup || 'unknown', confidence: decision.confidence || 0.5,
-				reason: decision.reason || '',
-				entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
-				entryIdx: i,
+				type: finalAction, entry: entryPrice, sl: slPrice, tp: tpPrice,
+				size, entryIdx: i, entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
+				setup: setupName, reason: entryReason, confidence: entryConf,
 			}
-
-			if (trades[sym].length === 0 || trades[sym].length % 3 === 0) {
-				console.log(`[Backtest] ${sym} candle#${i} ${decision.action} (${decision.setup}) @ ${price} | conf: ${((decision.confidence ?? 0) * 100).toFixed(0)}%`)
-			}
+			console.log(`[${sym}] ${finalAction} @ ${entryPrice} SL=${slPrice} TP=${tpPrice} size=${size.toFixed(4)} ${setupName}`)
 		}
 	}
 

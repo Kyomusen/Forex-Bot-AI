@@ -27,6 +27,15 @@ jobs:
           restore-keys: |
             candle-cache-
 
+      - name: Restore pending orders
+        uses: actions/cache@v4
+        id: pending-cache
+        with:
+          path: logs/pending_orders.json
+          key: pending-${{ github.run_id }}
+          restore-keys: |
+            pending-
+
       - name: Restore knowledge & trade history
         uses: actions/cache@v4
         id: knowledge-cache

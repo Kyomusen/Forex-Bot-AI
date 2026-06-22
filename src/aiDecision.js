@@ -1,10 +1,41 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import dotenv from 'dotenv'
+import fs from 'fs'
 
 dotenv.config()
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' })
+
+const AI_CACHE_FILE = './logs/ai_cache.json'
+const AI_CACHE_TTL_MS = 15 * 60 * 1000
+
+function loadAICache() {
+	if (!fs.existsSync(AI_CACHE_FILE)) return {}
+	try { return JSON.parse(fs.readFileSync(AI_CACHE_FILE, 'utf-8')) } catch { return {} }
+}
+
+function saveAICache(cache) {
+	const dir = AI_CACHE_FILE.substring(0, AI_CACHE_FILE.lastIndexOf('/'))
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+	fs.writeFileSync(AI_CACHE_FILE, JSON.stringify(cache, null, 2))
+}
+
+function getCachedAI(key) {
+	const cache = loadAICache()
+	const entry = cache[key]
+	if (!entry) return null
+	const age = Date.now() - new Date(entry.timestamp).getTime()
+	if (age > AI_CACHE_TTL_MS) return null
+	console.log(`[AI] ใช้ cache (${Math.round(age / 1000)}s ago) — ข้าม API call`)
+	return entry.data
+}
+
+function setCachedAI(key, data) {
+	const cache = loadAICache()
+	cache[key] = { timestamp: new Date().toISOString(), data }
+	saveAICache(cache)
+}
 
 function buildBatchPrompt(allData, learningHistory, knowledgeMd) {
 	const assetsPrompt = allData.map(({ symbol, indicators }) => {
@@ -77,6 +108,9 @@ ${knowledgeSection}
 }
 
 async function getAIDecision(allData, learningHistory, knowledgeMd) {
+	const cached = getCachedAI('decision')
+	if (cached) return cached
+
 	const textPrompt = buildBatchPrompt(allData, learningHistory, knowledgeMd)
 	const parts = [{ text: textPrompt }]
 
@@ -97,7 +131,9 @@ async function getAIDecision(allData, learningHistory, knowledgeMd) {
 
 	try {
 		const cleaned = text.replace(/```json|```/g, '').trim()
-		return JSON.parse(cleaned)
+		const parsed = JSON.parse(cleaned)
+		setCachedAI('decision', parsed)
+		return parsed
 	} catch (err) {
 		console.error('[AI] parse error:', err.message)
 		return allData.map(d => ({
@@ -175,6 +211,9 @@ ${knowledgeSection}
 }
 
 async function getAIConditionalOrders(allData, learningHistory, knowledgeMd) {
+	const cached = getCachedAI('conditional')
+	if (cached) return cached
+
 	const textPrompt = buildConditionalPrompt(allData, learningHistory, knowledgeMd)
 	const parts = [{ text: textPrompt }]
 
@@ -195,7 +234,9 @@ async function getAIConditionalOrders(allData, learningHistory, knowledgeMd) {
 
 	try {
 		const cleaned = text.replace(/```json|```/g, '').trim()
-		return JSON.parse(cleaned)
+		const parsed = JSON.parse(cleaned)
+		setCachedAI('conditional', parsed)
+		return parsed
 	} catch (err) {
 		console.error('[AI] conditional parse error:', err.message)
 		return []

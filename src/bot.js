@@ -10,6 +10,7 @@ import { addTrade, getLearningHistory, loadHistory, saveHistory } from './tradeH
 import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
+import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
 
 dotenv.config()
 
@@ -106,6 +107,31 @@ async function runAllCycles() {
 	console.log('[Bot] ถาม AI สำหรับทุกสินทรัพย์...')
 	const decisions = await getAIDecision(allData, getLearningHistory(), loadKnowledge())
 	console.log('[Bot] AI decisions received')
+
+	for (const d of decisions) {
+		if (d.action === 'HOLD' || d.trend_alignment === 'conflicted' || !d.action) {
+			const symbolData = allData.find(x => x.symbol === d.symbol)
+			if (symbolData) {
+				const primaryIndicators = symbolData.indicators[TIMEFRAMES[0].label]
+				const h4Indicators = symbolData.indicators[TIMEFRAMES[2]?.label]
+				const h4Trend = h4Indicators?.emaTrend || 'neutral'
+				const ruleDecision = strategyEval({
+					symbol: d.symbol,
+					h4Trend,
+					ind: primaryIndicators,
+					knowledge: false,
+				})
+				if (ruleDecision) {
+					d.action = ruleDecision.action
+					d.sl_pips = ruleDecision.slPips
+					d.tp_pips = ruleDecision.tpPips
+					d.confidence = ruleDecision.confidence
+					d.reason = `Rule-based ${ruleDecision.setup} (RSI-based)`
+					d.trend_alignment = 'aligned'
+				}
+			}
+		}
+	}
 
 	const results = []
 

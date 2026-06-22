@@ -59,11 +59,38 @@ function getAuthHeaders() {
 async function getCandles(symbol, resolution = 'MINUTE_15', max = 100) {
 	await ensureSession()
 	const epic = toEpic(symbol)
+	const CHUNK = 1000
+	if (max <= CHUNK) {
+		const res = await axios.get(`${BASE_URL}/prices/${epic}`, {
+			headers: getAuthHeaders(),
+			params: { resolution, max },
+		})
+		return res.data.prices || []
+	}
 	const res = await axios.get(`${BASE_URL}/prices/${epic}`, {
 		headers: getAuthHeaders(),
-		params: { resolution, max },
+		params: { resolution, max: CHUNK },
 	})
-	return res.data.prices
+	const prices = res.data.prices || []
+	if (!prices.length) return prices
+	let oldestTime = prices[prices.length - 1].snapshotTimeUTC || prices[prices.length - 1].snapshotTime
+	const totalNeeded = max
+	while (prices.length < totalNeeded) {
+		const remaining = totalNeeded - prices.length
+		const chunkSize = Math.min(CHUNK, remaining)
+		const to = new Date(oldestTime).getTime() - 60000
+		const toStr = new Date(to).toISOString().replace(/\.\d+Z$/, '')
+		const res2 = await axios.get(`${BASE_URL}/prices/${epic}`, {
+			headers: getAuthHeaders(),
+			params: { resolution, max: chunkSize, to: toStr },
+		})
+		const chunk = res2.data.prices || []
+		if (!chunk.length) break
+		prices.push(...chunk)
+		if (chunk.length < chunkSize) break
+		oldestTime = chunk[chunk.length - 1].snapshotTimeUTC || chunk[chunk.length - 1].snapshotTime
+	}
+	return prices
 }
 
 async function getOpenPositions() {

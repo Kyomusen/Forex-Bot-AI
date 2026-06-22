@@ -224,4 +224,24 @@ async function sendBacktestReport(report) {
 	}
 }
 
-export { sendOrderNotification, sendErrorNotification, sendCycleSummary, sendBacktestReport }
+async function sendBatchNotification({ symbols, decisions, batchNum, totalBatches }) {
+	if (!WEBHOOK_URL) return
+	const embed = {
+		title: `🤖 AI Batch ${batchNum}/${totalBatches}`,
+		color: 0x3498db,
+		fields: [
+			{ name: '🔤 สินทรัพย์', value: symbols.join(', '), inline: true },
+			{ name: '📊 จำนวนสัญญาณ', value: `${decisions.length}`, inline: true },
+			{ name: '📋 รายละเอียด', value: decisions.map(d => `\`${d.candle}\` ${d.symbol} **${d.action}**`).join('\n') || 'ไม่มีสัญญาณ', inline: false },
+		],
+		timestamp: new Date().toISOString(),
+	}
+	try {
+		await axios.post(WEBHOOK_URL, { embeds: [embed] })
+		console.log(`[Discord] ✅ ส่ง batch ${batchNum}/${totalBatches} notification`)
+	} catch (err) {
+		console.error('[Discord] batch notify error:', err.message)
+	}
+}
+
+export { sendOrderNotification, sendErrorNotification, sendCycleSummary, sendBacktestReport, sendBatchNotification }

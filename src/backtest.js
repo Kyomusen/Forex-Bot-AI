@@ -2,7 +2,7 @@ import dotenv from 'dotenv'
 import fs from 'fs'
 import { createSession, getCandles } from './capitalClient.js'
 import { getIndicators, getMultiTFIndicators } from './indicators.js'
-import { sendBacktestReport } from './discordNotifier.js'
+import { sendBacktestReport, sendBatchNotification } from './discordNotifier.js'
 import { recordTrades, shouldSkipSetup, printSummary } from './backtestLearning.js'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 
@@ -367,6 +367,12 @@ Only include NON-HOLD signals. Candle indices range from 60 to ${maxCandle - 1}.
 					}
 				}
 				console.log(`[AI] batch [${batch.join(',')}]: ได้ ${decisions.length} decisions`)
+				await sendBatchNotification({
+					symbols: batch,
+					decisions,
+					batchNum: batches.indexOf(batch) + 1,
+					totalBatches: batches.length,
+				})
 			}
 		} catch (err) {
 			console.warn(`[AI] batch error [${batch.join(',')}]: ${err.message}`)

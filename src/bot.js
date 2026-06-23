@@ -49,8 +49,27 @@ const TF_LABEL_MAP = {
 	'DAY':       '1D',
 }
 
-const CRON_SCHEDULE = CRON_MAP[PRIMARY_TIMEFRAME] ?? '*/15 * * * *'
-const SELECTED_TFS = TF_MAP[PRIMARY_TIMEFRAME] ?? ['MINUTE_15', 'HOUR', 'HOUR_4']
+const TF_MINUTES = {
+	'MINUTE_1':  1,
+	'MINUTE_5':  5,
+	'MINUTE_15': 15,
+	'MINUTE_30': 30,
+	'HOUR':      60,
+	'HOUR_4':    240,
+	'DAY':       1440,
+}
+
+function getNextCandleTime(tf) {
+	const interval = TF_MINUTES[tf] || 60
+	const now = Date.now()
+	const msSinceMidnight = (now % 86400000)
+	const intervalMs = interval * 60000
+	const nextInterval = Math.ceil(msSinceMidnight / intervalMs) * intervalMs
+	return Math.floor(now / 86400000) * 86400000 + nextInterval
+}
+
+const CRON_SCHEDULE = CRON_MAP[PRIMARY_TIMEFRAME] ?? '0 * * * *'
+const SELECTED_TFS = TF_MAP[PRIMARY_TIMEFRAME] ?? ['HOUR', 'HOUR_4', 'DAY']
 
 const TIMEFRAMES = SELECTED_TFS.map(tf => ({
 	tf,
@@ -59,6 +78,16 @@ const TIMEFRAMES = SELECTED_TFS.map(tf => ({
 
 async function runAllCycles() {
 	console.log(`\n[Bot] ===== รอบใหม่ ${new Date().toISOString()} =====`)
+	console.log(`[Bot] Timeframe: ${PRIMARY_TIMEFRAME}`)
+
+	// Sync to next candle boundary so we always analyze fresh candles
+	const nextCandle = getNextCandleTime(PRIMARY_TIMEFRAME)
+	const waitMs = nextCandle - Date.now()
+	if (waitMs > 100 && waitMs < 3600000) {
+		console.log(`[Bot] รอ ${Math.round(waitMs / 1000)}s จนถึง candle ${PRIMARY_TIMEFRAME} ถัดไป...`)
+		await new Promise(r => setTimeout(r, waitMs + 1000))
+	}
+	console.log(`[Bot] Candle ใหม่เริ่มแล้ว — ${new Date().toISOString()}`)
 
 	// Phase 1: Execute pending orders (fast, no AI)
 	console.log('[Bot] Phase 1: ตรวจสอบ Pending Orders...')

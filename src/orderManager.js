@@ -12,7 +12,7 @@ async function placeOrder(orderParams) {
 		console.log('[Order] เปิด position สำเร็จ:', result)
 		return result
 	} catch (err) {
-		console.error('[Order] เปิด position ล้มเหลว:', err.response?.data ?? err.message)
+		console.error('[Order] เปิด position ล้มเหลว:', JSON.stringify(err.response?.data ?? err.message))
 		return null
 	}
 }

@@ -68,7 +68,7 @@ jobs:
           FALLBACK_GEMINI_API_KEY: ${{ secrets.FALLBACK_GEMINI_API_KEY }}
           FALLBACK_GEMINI_API_KEY_2: ${{ secrets.FALLBACK_GEMINI_API_KEY_2 }}
           SYMBOLS: ${{ secrets.SYMBOLS }}
-          TIMEFRAME: ${{ secrets.TIMEFRAME }}
+          TIMEFRAME: 'HOUR'
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ACCOUNT_BALANCE: ${{ secrets.ACCOUNT_BALANCE }}
           RISK_PERCENT: ${{ secrets.RISK_PERCENT }}

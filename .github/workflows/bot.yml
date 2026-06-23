@@ -43,6 +43,10 @@ jobs:
           path: |
             logs/knowledge.md
             logs/trade_history.json
+            logs/filter_knowledge.json
+            logs/filter_wisdom.md
+            logs/ai_learned_rules.json
+            logs/api_usage.json
           key: knowledge-${{ github.run_id }}
           restore-keys: |
             knowledge-
@@ -61,9 +65,12 @@ jobs:
           CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
           CAPITAL_API_KEY: ${{ secrets.CAPITAL_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FALLBACK_GEMINI_API_KEY: ${{ secrets.FALLBACK_GEMINI_API_KEY }}
+          FALLBACK_GEMINI_API_KEY_2: ${{ secrets.FALLBACK_GEMINI_API_KEY_2 }}
           SYMBOLS: ${{ secrets.SYMBOLS }}
           TIMEFRAME: ${{ secrets.TIMEFRAME }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ACCOUNT_BALANCE: ${{ secrets.ACCOUNT_BALANCE }}
           RISK_PERCENT: ${{ secrets.RISK_PERCENT }}
           PAPER_TRADING: 'false'  # set to 'true' for paper trading (no real orders)
+          CAPITAL_DEMO: 'true'    # set to 'false' for live trading

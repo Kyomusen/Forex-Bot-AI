@@ -3,7 +3,10 @@ import dotenv from 'dotenv'
 
 dotenv.config()
 
-const BASE_URL = 'https://api-capital.backend-capital.com/api/v1'
+const DEMO = process.env.CAPITAL_DEMO === 'true'
+const BASE_URL = DEMO
+	? 'https://demo-api-capital.backend-capital.com/api/v1'
+	: 'https://api-capital.backend-capital.com/api/v1'
 
 const SYMBOL_TO_EPIC = {
 	XAUUSD: 'GOLD',

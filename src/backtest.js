@@ -4,7 +4,11 @@ import { createSession, getCandles } from './capitalClient.js'
 import { getIndicators, getMultiTFIndicators } from './indicators.js'
 import { sendBacktestReport, sendBatchNotification } from './discordNotifier.js'
 import { recordTrades, shouldSkipSetup, printSummary } from './backtestLearning.js'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { waitForAISlot, recordAICall } from './aiDecision.js'
+import { recordTradeResult, querySimilarTrades } from './filterLearning.js'
+import { saveWisdom, getWisdomForPrompt } from './filterWisdom.js'
+import { aiLearnFromTrades, getLearnedRulesForPrompt } from './aiLearn.js'
+import { getGeminiModel } from './geminiClient.js'
 
 dotenv.config()
 
@@ -18,30 +22,6 @@ const SL_PIPS_DEFAULT = parseInt(process.env.BACKTEST_SL_PIPS ?? '15')
 const TP_PIPS_DEFAULT = parseInt(process.env.BACKTEST_TP_PIPS ?? '30')
 const TREND_TF = TF === 'HOUR' ? 'HOUR_4' : 'DAY'
 const CANDLE_OFFSET = parseInt(process.env.BACKTEST_OFFSET ?? '0')
-
-const aiCallTimestamps = []
-
-function canCallAI() {
-	const now = Date.now()
-	const cutoff = now - 60_000
-	while (aiCallTimestamps.length > 0 && aiCallTimestamps[0] < cutoff) {
-		aiCallTimestamps.shift()
-	}
-	return aiCallTimestamps.length < 13
-}
-
-function recordAICall() {
-	aiCallTimestamps.push(Date.now())
-}
-
-async function waitForAISlot() {
-	while (!canCallAI()) {
-		const oldest = aiCallTimestamps[0]
-		const waitMs = 60_000 - (Date.now() - oldest) + 500
-		console.log(`[RateLimit] ถึง limit แล้ว — รอ ${Math.ceil(waitMs / 1000)}s...`)
-		await new Promise(r => setTimeout(r, waitMs))
-	}
-}
 
 const CACHE_FILE = './logs/candle_cache.json'
 
@@ -107,16 +87,9 @@ function isDDDisabled(sym, currentTotal, peakTotal) {
 const SYMBOL_STRATEGY = {
 	EURUSD: {
 		allowedSetups: ['pullback_sell'],
-		rsi: {
-			pullback_sell: { min: 60, max: 80 },
-		},
-		trendRequired: false,
-		requireH1Trend: false,
-		requireBelowEma50: false,
-		atrSlM: 1.5,
-		atrTpM: 3.5,
-		minSl: 12,
-		minTp: 25,
+		rsi: { pullback_sell: { min: 58, max: 78 } },
+		trendRequired: false, requireH1Trend: false, requireBelowEma50: false,
+		atrSlM: 1.2, atrTpM: 3.0, minSl: 10, minTp: 22,
 	},
 	XAUUSD: {
 		allowedSetups: ['momentum_sell'],
@@ -133,16 +106,9 @@ const SYMBOL_STRATEGY = {
 	},
 	GBPUSD: {
 		allowedSetups: ['momentum_sell'],
-		rsi: {
-			momentum_sell: { min: 28, max: 44 },
-		},
-		trendRequired: false,
-		requireH1Trend: true,
-		requireBelowEma50: false,
-		atrSlM: 1.2,
-		atrTpM: 3.0,
-		minSl: 10,
-		minTp: 22,
+		rsi: { momentum_sell: { min: 28, max: 44 } },
+		trendRequired: false, requireH1Trend: false, requireBelowEma50: false,
+		atrSlM: 1.2, atrTpM: 3.0, minSl: 10, minTp: 22,
 	},
 	USDJPY: {
 		allowedSetups: ['momentum_buy'],
@@ -314,72 +280,216 @@ function buildIndicatorSummary(candles, count = 200) {
 	return rows.join('\n')
 }
 
-async function runAIBacktest(activeSymbols, allData, minLen) {
-	console.log('[AI] ส่ง indicator summary ให้ Gemini วิเคราะห์...')
+async function runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart = 60, segEnd = null) {
+	const endIdx = segEnd ?? minLen
+	console.log(`[AI] กำลังรวบรวมสัญญาณ Indicator ช่วง ${segStart}-${endIdx}...`)
 
-	const aiDecisions = {}
-	for (const sym of activeSymbols) aiDecisions[sym] = {}
+	const aiFiltered = {}
+	for (const sym of activeSymbols) aiFiltered[sym] = {}
 
-	const BATCH_SIZE = 2
-	const batches = []
-	for (let i = 0; i < activeSymbols.length; i += BATCH_SIZE) {
-		batches.push(activeSymbols.slice(i, i + BATCH_SIZE))
-	}
+	const ruleSignals = []
 
-	const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
-	const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' })
-
-	for (const batch of batches) {
-		await waitForAISlot()
-
-		const parts = []
-		const maxCandle = Math.max(...batch.map(sym => allData[sym].h1.length))
-
-		const prompt = `You are an expert Forex AI trader. Analyze the indicator summaries below and identify profitable trade signals.
-
-For each symbol, identify specific candle indices where a clear BUY or SELL signal appears.
-Each row format: idx,time,Price,RSI,EMA_trend,MACD_histogram,ATR
-
-Respond ONLY with a valid JSON array (no markdown):
-[{"candle":0,"symbol":"EURUSD","action":"BUY"|"SELL"},...]
-
-Only include NON-HOLD signals. Candle indices range from 60 to ${maxCandle - 1}.`
-
-		parts.push({ text: prompt })
-
-		for (const sym of batch) {
+	for (let i = segStart; i < endIdx; i++) {
+		for (const sym of activeSymbols) {
 			const { h1 } = allData[sym]
-			const summary = buildIndicatorSummary(h1.slice(0, minLen), Math.min(minLen, 200))
-			parts.push({ text: `\n=== ${sym} ===\n${summary}` })
-		}
+			const window = h1.slice(0, i + 1)
+			const ind = getIndicators(window)
+			ind.currentPrice = getPrice(h1[i])
+			if (!ind.rsi || !ind.atr) continue
 
-		try {
-			const result = await model.generateContent({ contents: [{ role: 'user', parts }] })
-			recordAICall()
-			const text = result.response.text()
-			const cleaned = text.replace(/```json|```/g, '').trim()
-			const decisions = JSON.parse(cleaned)
-
-			if (Array.isArray(decisions)) {
-				for (const d of decisions) {
-					if (d?.symbol && aiDecisions[d.symbol]) {
-						aiDecisions[d.symbol][d.candle] = d.action
-					}
+			const h1Time = h1[i].snapshotTime ?? h1[i].snapshotTimeUTC ?? i
+			const h4Cache = h4IndCache[sym]
+			let h4Trend = 'neutral'
+			if (h4Cache && h4Cache.length > 0) {
+				const t = new Date(h1Time).getTime()
+				let best = h4Cache[0]
+				for (const entry of h4Cache) {
+					if (new Date(entry.time).getTime() <= t) best = entry
 				}
-				console.log(`[AI] batch [${batch.join(',')}]: ได้ ${decisions.length} decisions`)
-				await sendBatchNotification({
-					symbols: batch,
-					decisions,
-					batchNum: batches.indexOf(batch) + 1,
-					totalBatches: batches.length,
+				h4Trend = best.emaTrend || 'neutral'
+			}
+
+			const decision = evaluate({ symbol: sym, h4Trend, ind, knowledge: false })
+			if (decision) {
+				ruleSignals.push({
+					symbol: sym, candle: i,
+					action: decision.action, setup: decision.setup,
+					confidence: decision.confidence,
+					rsi: ind.rsi, ema20: ind.ema20, ema50: ind.ema50,
+					emaTrend: ind.emaTrend,
+					macd: ind.macd, atr: ind.atr, currentPrice: ind.currentPrice,
 				})
 			}
-		} catch (err) {
-			console.warn(`[AI] batch error [${batch.join(',')}]: ${err.message}`)
 		}
 	}
 
-	return aiDecisions
+	console.log(`[AI] Indicator สร้างสัญญาณ ${ruleSignals.length} รายการ — กำลังให้ AI filter...`)
+
+	// Random signal sampling to save API calls
+	const RANDOM_SIGNALS = parseInt(process.env.BACKTEST_RANDOM_SIGNALS ?? '0')
+	if (RANDOM_SIGNALS > 0 && ruleSignals.length > RANDOM_SIGNALS * activeSymbols.length) {
+		const bySymbol = {}
+		for (const s of ruleSignals) {
+			if (!bySymbol[s.symbol]) bySymbol[s.symbol] = []
+			bySymbol[s.symbol].push(s)
+		}
+		const sampled = []
+		let skipped = 0
+		for (const sym of activeSymbols) {
+			const symSignals = bySymbol[sym] || []
+			if (symSignals.length <= RANDOM_SIGNALS) {
+				sampled.push(...symSignals)
+			} else {
+				const shuffled = [...symSignals].sort(() => Math.random() - 0.5)
+				sampled.push(...shuffled.slice(0, RANDOM_SIGNALS))
+				skipped += symSignals.length - RANDOM_SIGNALS
+			}
+		}
+		ruleSignals.length = 0
+		ruleSignals.push(...sampled)
+		console.log(`[AI] สุ่มตัวอย่าง ${sampled.length} สัญญาณ (ข้าม ${skipped} เพื่อประหยัด API)`)
+	}
+
+	const model = getGeminiModel()
+
+	const BATCH_SIZE = 30
+	let batchIdx = 0
+	while (batchIdx < ruleSignals.length) {
+		const gotSlot = await waitForAISlot()
+		if (!gotSlot) {
+			console.warn(`[AI] ⏰ rate limit timeout — สัญญาณที่เหลือทั้งหมด (${ruleSignals.length - batchIdx} signals) จะ PROCEED อัตโนมัติ`)
+			for (let j = batchIdx; j < ruleSignals.length; j++) {
+				const s = ruleSignals[j]
+				aiFiltered[s.symbol][s.candle] = 'PROCEED'
+			}
+			break
+		}
+
+		const batch = ruleSignals.slice(batchIdx, batchIdx + BATCH_SIZE)
+
+		// Pre-filter: auto-SKIP signals matching known losing patterns
+		const filteredBatch = []
+		let autoSkipped = 0
+		for (const s of batch) {
+			const patterns = querySimilarTrades({
+				symbol: s.symbol, setup: s.setup,
+				rsi: s.rsi ?? 50,
+				macdHistogramTrend: s.macd?.histogramTrend ?? 'neutral',
+			})
+			if (patterns && patterns.winRate < 0.35 && patterns.total >= 3) {
+				autoSkipped++
+				continue
+			}
+			filteredBatch.push({ ...s, patterns })
+		}
+
+		if (autoSkipped > 0) {
+			console.log(`[AI] Auto-skip ${autoSkipped} signals with known losing patterns`)
+		}
+		if (filteredBatch.length === 0) {
+			batchIdx += BATCH_SIZE
+			continue
+		}
+
+		// Build per-symbol learning context
+		const learningBySymbol = {}
+		for (const s of filteredBatch) {
+			if (s.patterns) {
+				const key = `${s.symbol}:${s.setup}`
+				if (!learningBySymbol[key]) {
+					learningBySymbol[key] = s.patterns
+				}
+			}
+		}
+		let learningContext = ''
+		for (const [key, p] of Object.entries(learningBySymbol)) {
+			const [sym, setup] = key.split(':')
+			const riskLabel = p.winRate < 0.3 ? 'HIGH RISK' : p.winRate < 0.4 ? 'CAUTION' : 'NORMAL'
+			learningContext += `\n- ${sym} ${setup}: ${p.total} past trades, WR ${(p.winRate * 100).toFixed(0)}% (${p.wins}W/${p.losses}L) — ${riskLabel}`
+			const w = getWisdomForPrompt(sym, setup)
+			if (w) learningContext += `\n  Wisdom: ${w}`
+		}
+
+		// Add AI-learned rules to context
+		let aiRulesContext = ''
+		for (const s of filteredBatch) {
+			const rules = getLearnedRulesForPrompt(s.symbol)
+			if (rules && rules.skipRules?.length > 0) {
+				aiRulesContext += `\n[Ai Learned Rules for ${s.symbol}]\n` + rules.skipRules.map(r => `  SKIP: ${r}`).join('\n')
+				if (rules.proceedRules?.length > 0) {
+					aiRulesContext += '\n' + rules.proceedRules.map(r => `  PROCEED: ${r}`).join('\n')
+				}
+			}
+		}
+
+		const signalsText = filteredBatch.map(s =>
+			`[${s.symbol} C${s.candle}] ${s.action} | ${s.setup} | RSI:${s.rsi?.toFixed(1)} | MACD:${s.macd?.histogram?.toFixed(4)} (${s.macd?.histogramTrend}) | Price${s.currentPrice > s.ema20 ? '>EMA20' : '<EMA20'} | Trend:${s.emaTrend}`
+		).join('\n')
+
+		const prompt = `You are a FOREX signal filter. The indicator detected signals below.
+Default to PROCEED. SKIP only when the LEARNING section clearly shows <30% win rate with 5+ trades for that signal's pattern.
+Be decisive: skip bad patterns, but default to proceed when unsure or data is limited.
+${learningContext}
+${aiRulesContext}
+Signals:
+${signalsText}
+
+Respond ONLY valid JSON array (no markdown):
+[{"candle":0,"symbol":"EURUSD","action":"PROCEED","confidence":0.9,"reason":"..."}]`
+
+		let retry429 = 0
+		let batchSuccess = false
+		while (!batchSuccess && retry429 < 3) {
+			try {
+				const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] })
+				recordAICall()
+				const text = result.response.text()
+				const cleaned = text.replace(/```json|```/g, '').trim()
+				const decisions = JSON.parse(cleaned)
+
+				if (Array.isArray(decisions)) {
+					for (const d of decisions) {
+						const candleIdx = parseInt(String(d.candle).replace(/^C/, ''), 10)
+						if (!isNaN(candleIdx) && d?.symbol && aiFiltered[d.symbol] && d.action === 'PROCEED') {
+							aiFiltered[d.symbol][candleIdx] = d.action
+						}
+					}
+					const proceed = decisions.filter(d => d?.action === 'PROCEED').length
+					console.log(`[AI] Batch ${Math.ceil((batchIdx + BATCH_SIZE) / BATCH_SIZE)}/${Math.ceil(ruleSignals.length / BATCH_SIZE)}: ${decisions.length} signals, ${proceed} PROCEED`)
+					await sendBatchNotification({
+						symbols: [...new Set(batch.map(s => s.symbol))],
+						decisions: decisions.map(d => ({ candle: d.candle, symbol: d.symbol, action: d.action })),
+						batchNum: Math.ceil((batchIdx + BATCH_SIZE) / BATCH_SIZE),
+						totalBatches: Math.ceil(ruleSignals.length / BATCH_SIZE),
+					})
+				}
+				batchSuccess = true
+				batchIdx += BATCH_SIZE
+			} catch (err) {
+				const status = String(err.status || err.code || err.message || '')
+				if ((status === '429' || status.includes('429') || status.includes('RATE_LIMIT') || status.includes('Too Many Requests')) && retry429 < 2) {
+					retry429++
+					const baseWait = parseInt(err.message?.match(/retryDelay.*?(\d+)/i)?.[1] ?? '30') || 30
+					const waitSec = baseWait * retry429  // exponential backoff
+					console.warn(`[AI] 🐢 Batch 429 (ครั้งที่ ${retry429})! รอ ${waitSec}s แล้วลองใหม่`)
+					// Add extra buffer to rate limiter
+					for (let i = 0; i < Math.ceil(waitSec / (60000 / 13)); i++) recordAICall()
+					await new Promise(r => setTimeout(r, Math.min(waitSec * 1000, 60000)))
+				} else {
+					console.warn(`[AI] batch filter error (${err.message?.slice(0, 60)}) — fallback PROCEED`)
+					for (const s of batch) {
+						aiFiltered[s.symbol][s.candle] = 'PROCEED'
+					}
+					batchSuccess = true
+					batchIdx += BATCH_SIZE
+				}
+			}
+		}
+	}
+
+	const totalProceed = Object.values(aiFiltered).reduce((sum, map) => sum + Object.keys(map).length, 0)
+	console.log(`[AI] Filter complete: ${ruleSignals.length} signals → ${totalProceed} PROCEED (${((totalProceed / ruleSignals.length) * 100).toFixed(1)}%)`)
+	return { filtered: aiFiltered, calls: Math.ceil(ruleSignals.length / BATCH_SIZE) }
 }
 
 async function runBacktest() {
@@ -441,16 +551,44 @@ async function runBacktest() {
 	}
 
 	const startIdx = 60
+	const NUM_SEGMENTS = Math.max(1, parseInt(process.env.BACKTEST_SEGMENTS ?? '1'))
+	const segSize = NUM_SEGMENTS > 1 ? Math.floor((minLen - startIdx) / NUM_SEGMENTS) : (minLen - startIdx)
 
-	let aiDecisionsMap = {}
-	if (USE_AI) {
-		const decisions = await runAIBacktest(activeSymbols, allData, minLen)
-		aiDecisionsMap = decisions
-		aiCallsUsed = Math.ceil(activeSymbols.length / 2)
-	}
+	const allSegmentTrades = {}
+	for (const sym of activeSymbols) allSegmentTrades[sym] = []
+	let cumProfit = 0
+	let segAiCalls = 0
+	let globalMaxDD = 0
 
-	for (let i = startIdx; i < minLen; i++) {
+	for (let seg = 0; seg < NUM_SEGMENTS; seg++) {
+		const segStart = startIdx + seg * segSize
+		const segEnd = seg < NUM_SEGMENTS - 1 ? segStart + segSize : minLen
+
+		if (NUM_SEGMENTS > 1) {
+			console.log(`\n───── Segment ${seg + 1}/${NUM_SEGMENTS} (candle ${segStart}-${segEnd}) ─────`)
+		}
+
+		const balances = {}
+		const positions = {}
+		const trades = {}
+		let peakTotal = BALANCE_PER_SYMBOL * activeSymbols.length
+		let maxDD = 0
+
 		for (const sym of activeSymbols) {
+			balances[sym] = BALANCE_PER_SYMBOL
+			positions[sym] = null
+			trades[sym] = []
+		}
+
+		let aiFilteredMap = {}
+		if (USE_AI) {
+			const result = await runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart, segEnd)
+			aiFilteredMap = result.filtered
+			segAiCalls += result.calls
+		}
+
+		for (let i = segStart; i < segEnd; i++) {
+			for (const sym of activeSymbols) {
 			const { h1 } = allData[sym]
 			const current = h1[i]
 			const price = getPrice(current)
@@ -468,6 +606,13 @@ async function runBacktest() {
 						exit: result.price, pnl: parseFloat(pnl.toFixed(2)), result: pnl >= 0 ? 'WIN' : 'LOSS',
 						exitTime: result.at, entryTime: pos.entryTime, bars: i - pos.entryIdx,
 						reason: pos.reason, confidence: pos.confidence,
+					})
+					recordTradeResult({
+						symbol: sym, action: pos.type, setup: pos.setup,
+						entryIndicators: pos.entryIndicators,
+						result: pnl >= 0 ? 'WIN' : 'LOSS',
+						pnl: parseFloat(pnl.toFixed(2)),
+						aiDecision: USE_AI ? 'PROCEED' : 'NONE',
 					})
 					positions[sym] = null
 					const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
@@ -497,28 +642,18 @@ async function runBacktest() {
 			const mainInd = Object.values(indicators)[0]
 			if (mainInd) mainInd.currentPrice = price
 
-			let finalAction = null
-			let setupName = ''
-			let entryReason = ''
-			let entryConf = 0
+			const ruleDecision = evaluate({ symbol: sym, h4Trend, ind: mainInd, knowledge: true })
+			if (!ruleDecision || ruleDecision.action === 'HOLD') continue
+
 			if (USE_AI) {
-				const aiAction = aiDecisionsMap[sym]?.[i]
-				if (aiAction === 'BUY' || aiAction === 'SELL') {
-					finalAction = aiAction
-					setupName = 'AI'
-					entryConf = 0.7
-				}
-			}
-			if (!finalAction) {
-				const ruleDecision = evaluate({ symbol: sym, h4Trend, ind: mainInd, knowledge: true })
-				if (!ruleDecision || ruleDecision.action === 'HOLD') continue
-				finalAction = ruleDecision.action
-				setupName = ruleDecision.reason?.slice(0, 30) ?? 'rules'
-				entryReason = ruleDecision.reason
-				entryConf = ruleDecision.confidence
+				const filterAction = aiFilteredMap[sym]?.[i]
+				if (filterAction !== 'PROCEED') continue
 			}
 
-			if (!finalAction) continue
+			const finalAction = ruleDecision.action
+			const setupName = ruleDecision.reason?.slice(0, 30) ?? 'rules'
+			const entryReason = ruleDecision.reason
+			const entryConf = ruleDecision.confidence
 
 			const atrVal = mainInd?.atr ?? 0
 			const { slPips, tpPips } = atrParams(atrVal, sym)
@@ -532,17 +667,52 @@ async function runBacktest() {
 				type: finalAction, entry: entryPrice, sl: slPrice, tp: tpPrice,
 				size, entryIdx: i, entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
 				setup: setupName, reason: entryReason, confidence: entryConf,
+			entryIndicators: mainInd ? {
+				rsi: mainInd.rsi,
+				ema20: mainInd.ema20,
+				emaTrend: mainInd.emaTrend,
+				macd: mainInd.macd,
+				atr: mainInd.atr,
+				currentPrice: price,
+			} : null,
 			}
 			console.log(`[${sym}] ${finalAction} @ ${entryPrice} SL=${slPrice.toFixed(5)} TP=${tpPrice.toFixed(5)} size=${size.toFixed(4)} ${setupName}`)
 		}
 	}
 
-	const allTrades = Object.values(trades).flat()
-	const closedTrades = allTrades.filter(t => t.result !== 'UNKNOWN')
-	recordTrades(allTrades)
+		// Copy segment trades to cumulative
+		for (const sym of activeSymbols) {
+			allSegmentTrades[sym].push(...trades[sym])
+		}
 
-	const finalBalance = Object.values(balances).reduce((a, b) => a + b, 0)
-	await printReport(trades, balances, totalBalance, finalBalance, closedTrades, aiCallsUsed, maxDD)
+		const segAllTrades = Object.values(trades).flat()
+		recordTrades(segAllTrades)
+
+		saveWisdom()
+		if (USE_AI || process.env.BACKTEST_LEARN === 'true') await aiLearnFromTrades()
+
+		const segFinal = Object.values(balances).reduce((a, b) => a + b, 0)
+		const segPnl = segFinal - BALANCE_PER_SYMBOL * activeSymbols.length
+		cumProfit += segPnl
+		if (maxDD > globalMaxDD) globalMaxDD = maxDD
+		const segClosed = segAllTrades.filter(t => t.result !== 'UNKNOWN')
+		console.log(`➡️  Segment ${seg + 1}: $${segPnl >= 0 ? '+' : ''}${segPnl.toFixed(2)} | ${segClosed.length} trades | WR: ${segClosed.length > 0 ? (segClosed.filter(t => t.result === 'WIN').length / segClosed.length * 100).toFixed(1) : 'N/A'}%`)
+	} // end segment loop
+
+	const finalBalance = BALANCE_PER_SYMBOL * activeSymbols.length + cumProfit
+	const allTrades = Object.values(allSegmentTrades).flat()
+	const closedTrades = allTrades.filter(t => t.result !== 'UNKNOWN')
+	// Calculate final balances per symbol from cumulative trade pnl
+	const finalBalances = {}
+	for (const sym of activeSymbols) {
+		const symTrades = allSegmentTrades[sym] || []
+		const symPnl = symTrades.reduce((s, t) => s + (t.pnl ?? 0), 0)
+		finalBalances[sym] = BALANCE_PER_SYMBOL + symPnl
+	}
+	await printReport(allSegmentTrades, finalBalances, BALANCE_PER_SYMBOL * activeSymbols.length, finalBalance, closedTrades, segAiCalls, globalMaxDD)
+	if (NUM_SEGMENTS > 1) {
+		console.log(`\n📈 Cumulative PnL across ${NUM_SEGMENTS} segments: ${cumProfit >= 0 ? '+' : ''}${cumProfit.toFixed(2)}`)
+	}
 	printSummary()
 }
 

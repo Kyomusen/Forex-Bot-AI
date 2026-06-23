@@ -2,7 +2,7 @@ export const SYMBOL_STRATEGY = {
 	EURUSD: {
 		allowedSetups: ['pullback_sell'],
 		rsi: {
-			pullback_sell: { min: 60, max: 80 },
+			pullback_sell: { min: 58, max: 78 },
 		},
 		trendRequired: false,
 		requireH1Trend: false,
@@ -31,7 +31,7 @@ export const SYMBOL_STRATEGY = {
 			momentum_sell: { min: 28, max: 44 },
 		},
 		trendRequired: false,
-		requireH1Trend: true,
+		requireH1Trend: false,
 		requireBelowEma50: false,
 		atrSlM: 1.2,
 		atrTpM: 3.0,

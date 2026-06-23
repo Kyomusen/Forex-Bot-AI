@@ -1,11 +1,45 @@
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import dotenv from 'dotenv'
 import fs from 'fs'
+import { getGeminiModel } from './geminiClient.js'
+import { querySimilarTrades } from './filterLearning.js'
+import { getWisdomForPrompt } from './filterWisdom.js'
+import { getLearnedRulesForPrompt } from './aiLearn.js'
 
-dotenv.config()
+const model = getGeminiModel()
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' })
+const RATE_LIMIT_MAX = 13
+const RATE_LIMIT_WINDOW = 60000
+const RATE_LIMIT_MAX_WAIT_MS = parseInt(process.env.AI_RATE_LIMIT_TIMEOUT ?? '120000')
+const _aiCallTimestamps = []
+
+export function canCallAI() {
+	const now = Date.now()
+	const cutoff = now - RATE_LIMIT_WINDOW
+	while (_aiCallTimestamps.length > 0 && _aiCallTimestamps[0] < cutoff) {
+		_aiCallTimestamps.shift()
+	}
+	return _aiCallTimestamps.length < RATE_LIMIT_MAX
+}
+
+export function recordAICall() {
+	_aiCallTimestamps.push(Date.now())
+}
+
+async function waitForAISlot() {
+	const started = Date.now()
+	while (!canCallAI()) {
+		const elapsed = Date.now() - started
+		if (elapsed > RATE_LIMIT_MAX_WAIT_MS) {
+			console.warn(`[RateLimit] ⏰ รอเกิน ${Math.round(RATE_LIMIT_MAX_WAIT_MS / 1000)}s แล้ว — ข้าม AI รอบนี้ (fallback PROCEED)`)
+			return false
+		}
+		const oldest = _aiCallTimestamps[0]
+		const waitMs = Math.min(RATE_LIMIT_WINDOW - (Date.now() - oldest) + 500, RATE_LIMIT_MAX_WAIT_MS - elapsed)
+		if (waitMs <= 0) continue
+		console.log(`[RateLimit] ถึง limit — รอ ${Math.ceil(waitMs / 1000)}s (รอทั้งหมด ${Math.round(elapsed / 1000)}s / max ${Math.round(RATE_LIMIT_MAX_WAIT_MS / 1000)}s)`)
+		await new Promise(r => setTimeout(r, Math.min(waitMs, 5000)))
+	}
+	return true
+}
 
 const AI_CACHE_FILE = './logs/ai_cache.json'
 const AI_CACHE_TTL_MS = 15 * 60 * 1000
@@ -243,4 +277,102 @@ async function getAIConditionalOrders(allData, learningHistory, knowledgeMd) {
 	}
 }
 
-export { getAIDecision, getAIConditionalOrders }
+function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patterns, wisdom }) {
+	const { rsi, ema20, ema50, emaTrend, macd, atr, currentPrice } = marketData || {}
+	const macdHist = macd?.histogram ?? 0
+	const macdHistTrend = macd?.histogramTrend ?? 'neutral'
+	const pricePos = currentPrice && ema20 ? (currentPrice > ema20 ? 'above EMA20' : 'below EMA20') : 'unknown'
+
+	let learningSection = ''
+	if (patterns) {
+		const riskLabel = patterns.winRate < 0.3 ? '🔴 HIGH RISK' : patterns.winRate < 0.4 ? '🟡 CAUTION' : '🟢 NORMAL'
+		learningSection = `\n📊 Past ${patterns.total} similar trades on ${symbol} (${setup}):
+Wins: ${patterns.wins} | Losses: ${patterns.losses} | Win Rate: ${(patterns.winRate * 100).toFixed(0)}% | ${riskLabel}
+${patterns.winRate < 0.3 ? '⚠️ Past similar trades had LOW win rate — STRONGLY consider SKIP' : ''}
+${patterns.winRate < 0.4 ? '⚠️ Past similar trades were below average — use extra caution' : ''}`
+	}
+
+	let wisdomSection = ''
+	if (wisdom) {
+		wisdomSection = `\n Wisdom:\n${wisdom}`
+	}
+
+	const learnedRules = getLearnedRulesForPrompt(symbol)
+	let learnedSection = ''
+	if (learnedRules && learnedRules.skipRules?.length > 0) {
+		learnedSection = `\n[Ai Learned Rules for ${symbol}]\n${learnedRules.skipRules.map(r => `  SKIP: ${r}`).join('\n')}`
+		if (learnedRules.proceedRules?.length > 0) {
+			learnedSection += '\n' + learnedRules.proceedRules.map(r => `  PROCEED: ${r}`).join('\n')
+		}
+	}
+
+	return `You are a FOREX signal filter. The indicator detected a signal below.
+Default to PROCEED. SKIP only when past data clearly shows <30% win rate with 5+ similar trades.
+If unsure or data is limited → PROCEED.
+
+Signal: ${action} on ${symbol}
+Setup: ${setup} | Confidence: ${(confidence * 100).toFixed(0)}%
+Price: ${currentPrice} | RSI(14): ${rsi?.toFixed(2)}
+Price vs EMA20: ${pricePos} | EMA Trend: ${emaTrend}
+MACD Histogram: ${macdHist.toFixed(5)} (${macdHistTrend})
+ATR: ${atr?.toFixed(5)}${learningSection}${wisdomSection}${learnedSection}
+
+Respond ONLY valid JSON (no markdown):
+{"action":"PROCEED"|"SKIP","confidence":0-1,"reason":"brief reason"}`
+}
+
+async function getAIFilter(params) {
+	const hasSlot = await waitForAISlot()
+	if (!hasSlot) {
+		console.warn(`[AI] ${params.symbol} rate limit timeout — default PROCEED`)
+		return { action: 'PROCEED', confidence: 0.5, reason: 'Rate limit timeout — auto PROCEED' }
+	}
+
+	const { symbol, indicatorDecision, marketData } = params
+	const { action, setup, confidence } = indicatorDecision
+	const rsi = marketData?.rsi
+	const macdHistTrend = marketData?.macd?.histogramTrend
+
+	// Query past similar trades
+	const patterns = querySimilarTrades({
+		symbol, setup,
+		rsi: rsi ?? 50,
+		macdHistogramTrend: macdHistTrend ?? 'neutral',
+	})
+
+	// Auto-SKIP if past similar trades have low win rate
+	if (patterns && patterns.total >= 3 && patterns.winRate < 0.35) {
+		console.log(`[AI] ${symbol} auto-SKIP: past ${patterns.total} similar trades, WR ${(patterns.winRate * 100).toFixed(0)}%`)
+		return { action: 'SKIP', confidence: 0.4, reason: `Auto-skip: past ${patterns.total} similar trades had ${(patterns.winRate * 100).toFixed(0)}% win rate` }
+	}
+
+	const prompt = buildFilterPrompt({ symbol, ...indicatorDecision, marketData, patterns, wisdom: getWisdomForPrompt(symbol, setup) })
+
+	let lastError = null
+	for (let retry = 0; retry < 3; retry++) {
+		try {
+			const result = await model.generateContent(prompt)
+			recordAICall()
+			const text = result.response.text()
+			const cleaned = text.replace(/```json|```/g, '').trim()
+			return JSON.parse(cleaned)
+		} catch (err) {
+			lastError = err
+			const status = String(err.status || err.code || err.message || '')
+			if (status === '429' || status.includes('429') || status.includes('RATE_LIMIT') || status.includes('Too Many Requests')) {
+				const baseWait = parseInt(err.message?.match(/retryDelay.*?(\d+)/i)?.[1] ?? '10') || 10
+				const waitSec = baseWait * (retry + 1)
+				console.warn(`[AI] 🐢 429 rate limit (ครั้งที่ ${retry + 1}/3)! รอ ${waitSec}s แล้วลองใหม่`)
+				for (let i = 0; i < Math.ceil(waitSec / (60000 / 13)); i++) recordAICall()
+				await new Promise(r => setTimeout(r, Math.min(waitSec * 1000, 60000)))
+				continue
+			}
+			break
+		}
+	}
+
+	console.error('[AI] filter error:', lastError?.message || 'unknown')
+	return { action: 'PROCEED', confidence: 0.5, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
+}
+
+export { getAIDecision, getAIConditionalOrders, getAIFilter, waitForAISlot }

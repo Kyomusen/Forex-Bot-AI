@@ -74,7 +74,7 @@ async function runAllCycles() {
 					continue
 				}
 				const currentPrice = order.triggeredPrice
-				const orderParams = buildOrderParams({
+				const orderParams = await buildOrderParams({
 					decision: {
 						action: order.action,
 						sl_pips: order.sl_pips,
@@ -219,7 +219,7 @@ async function runAllCycles() {
 
 		// Step 4: Place order
 		const currentPrice = mainInd.currentPrice
-		const orderParams = buildOrderParams({
+		const orderParams = await buildOrderParams({
 			decision: { action, sl_pips: slPips, tp_pips: tpPips, confidence },
 			indicators: { currentPrice },
 			accountBalance: ACCOUNT_BALANCE,

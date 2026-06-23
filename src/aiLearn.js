@@ -1,5 +1,7 @@
+import dotenv from 'dotenv'
 import fs from 'fs'
 import { getGeminiModel } from './geminiClient.js'
+dotenv.config()
 
 const model = getGeminiModel()
 
@@ -25,10 +27,8 @@ async function waitForSlot() {
 	_callTimestamps.push(Date.now())
 }
 
-// Longer cooldown for learning calls (after batches just finished)
 async function waitWithCooldown() {
-	console.log(`[AI Learn] Cooling down 60s before analysis...`)
-	await new Promise(r => setTimeout(r, 60000))
+	await new Promise(r => setTimeout(r, 1000))
 	await waitForSlot()
 }
 
@@ -172,3 +172,15 @@ export function getLearnedRulesForPrompt(symbol) {
 }
 
 export { loadLearnedRules, saveLearnedRules }
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+	console.log(`[AI Learn] Standalone mode — loading ${loadTrades().length} trades...`)
+	aiLearnFromTrades().then(result => {
+		const count = result ? Object.keys(result).length : 0
+		console.log(`[AI Learn] Done — ${count} symbols learned`)
+		process.exit(0)
+	}).catch(err => {
+		console.error('[AI Learn] Fatal:', err.message)
+		process.exit(1)
+	})
+}

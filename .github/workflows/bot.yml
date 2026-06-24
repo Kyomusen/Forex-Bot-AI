@@ -1,6 +1,8 @@
 name: Forex Bot
 
 on:
+  schedule:
+    - cron: '3 * * * *'  # every hour at :03 (after HOUR candle closes)
   workflow_dispatch:
 
 jobs:

@@ -631,24 +631,35 @@ async function runBacktest() {
 			const pos = positions[sym]
 
 			if (pos) {
-				// Trailing stop logic (applies to all positions if enabled)
-				if (BACKTEST_TRAILING) {
-					const currentBest = pos.type === 'BUY'
-						? Math.max(pos.bestPrice, price)
-						: Math.min(pos.bestPrice, price)
-					const pnlPct = pos.atrValue > 0
-						? Math.abs(price - pos.entry) / pos.atrValue
-						: 0
-					if (pnlPct >= TRAILING_ACTIVATE && !pos.trailingActivated) {
-						pos.trailingActivated = true
-					}
-					if (pos.trailingActivated) {
-						const newSl = pos.type === 'BUY'
-							? Math.max(pos.sl, currentBest - TRAILING_DISTANCE * pos.atrValue)
-							: Math.min(pos.sl, currentBest + TRAILING_DISTANCE * pos.atrValue)
-						if (newSl !== pos.sl) {
-							pos.sl = newSl
-							pos.bestPrice = currentBest
+				// Trailing stop logic — use candle HIGH/LOW (not close) for proper trailing
+				if (BACKTEST_TRAILING && pos.atrValue > 0) {
+					const candleHigh = getHigh(h1[i])
+					const candleLow = getLow(h1[i])
+					if (pos.type === 'BUY') {
+						if (candleHigh > pos.bestPrice) pos.bestPrice = candleHigh
+						const profit = pos.bestPrice - pos.entry
+						if (profit >= TRAILING_ACTIVATE * pos.atrValue) {
+							const newSl = Math.max(pos.sl, pos.bestPrice - TRAILING_DISTANCE * pos.atrValue)
+							if (newSl > pos.sl) {
+								pos.sl = newSl
+								if (!pos.trailingActivated) {
+									pos.trailingActivated = true
+									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
+								}
+							}
+						}
+					} else {
+						if (candleLow < pos.bestPrice) pos.bestPrice = candleLow
+						const profit = pos.entry - pos.bestPrice
+						if (profit >= TRAILING_ACTIVATE * pos.atrValue) {
+							const newSl = Math.min(pos.sl, pos.bestPrice + TRAILING_DISTANCE * pos.atrValue)
+							if (newSl < pos.sl) {
+								pos.sl = newSl
+								if (!pos.trailingActivated) {
+									pos.trailingActivated = true
+									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
+								}
+							}
 						}
 					}
 				}

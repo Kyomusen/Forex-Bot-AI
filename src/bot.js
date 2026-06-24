@@ -13,6 +13,7 @@ import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
 import { loadPending, savePending, placePendingOrder, syncWithCapital, cleanExpired, executePendingOrders } from './pendingOrders.js'
 import { recordTradeResult } from './filterLearning.js'
 import { queryLogicRules, analyzeTradePatterns } from './logicLearning.js'
+import { aiLearnFromTrades } from './aiLearn.js'
 
 dotenv.config()
 
@@ -60,8 +61,8 @@ const TF_MINUTES = {
 
 async function checkTrailingStops() {
 	if (process.env.BACKTEST_TRAILING !== 'true') return
-	const trailingActivate = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE || '1.0')
-	const trailingDist = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE || '0.5')
+	const trailingActivate = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE || '0.5')
+	const trailingDist = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE || '0.3')
 	try {
 		const positions = await getOpenPositions()
 		if (!positions || positions.length === 0) return
@@ -402,6 +403,14 @@ async function runAllCycles() {
 				holdOvernight,
 				paper: PAPER_TRADING || undefined,
 			})
+			recordTradeResult({
+				symbol, action, setup,
+				entryIndicators: mainInd,
+				result: null, pnl: null,
+				aiDecision: 'PROCEED',
+				slPips, tpPips, exitReason: null,
+				holdOvernight, heldOvernight: null,
+			})
 			await sendOrderNotification({
 				action,
 				symbol,
@@ -428,6 +437,13 @@ async function runAllCycles() {
 		}
 	} catch (err) {
 		console.error('[Logic] learning error:', err.message)
+	}
+
+	// AI self-learning from trade history
+	try {
+		await aiLearnFromTrades()
+	} catch (err) {
+		console.error('[AI Learn] error:', err.message)
 	}
 }
 

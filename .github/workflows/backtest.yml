@@ -10,7 +10,7 @@ on:
       candles:
         description: 'Number of candles'
         required: true
-        default: '5000'
+        default: '20000'
       offset:
         description: 'Candle offset from latest'
         required: true
@@ -42,7 +42,7 @@ on:
       trend_mode:
         description: 'Trend filter: AND or OR'
         required: true
-        default: 'OR'
+        default: 'AND'
       sr_atr:
         description: 'S/R proximity ATR multiplier'
         required: true
@@ -54,11 +54,11 @@ on:
       trailing_activate:
         description: 'ATR profit to activate trailing'
         required: true
-        default: '1.0'
+        default: '0.5'
       trailing_distance:
         description: 'ATR distance for trailing SL'
         required: true
-        default: '0.5'
+        default: '0.3'
       atr_sl:
         description: 'ATR SL multiplier'
         required: true

@@ -16,17 +16,17 @@ dotenv.config()
 
 const SYMBOLS = (process.env.BACKTEST_SYMBOLS ?? 'EURUSD,XAUUSD,GBPUSD,USDJPY,US30').split(',')
 const TF = process.env.BACKTEST_TF ?? 'HOUR'
-const CANDLE_COUNT = parseInt(process.env.BACKTEST_CANDLES ?? '720')
+const CANDLE_COUNT = parseInt(process.env.BACKTEST_CANDLES ?? '20000')
 const BALANCE_PER_SYMBOL = parseFloat(process.env.BACKTEST_BALANCE ?? '500')
 const USE_AI = process.env.BACKTEST_USE_AI === 'true'
-const RISK_PERCENT = parseFloat(process.env.BACKTEST_RISK ?? '0.3')
+const RISK_PERCENT = parseFloat(process.env.BACKTEST_RISK ?? '1.0')
 const SL_PIPS_DEFAULT = parseInt(process.env.BACKTEST_SL_PIPS ?? '15')
 const TP_PIPS_DEFAULT = parseInt(process.env.BACKTEST_TP_PIPS ?? '30')
 const TREND_TF = TF === 'HOUR' ? 'HOUR_4' : 'DAY'
 const CANDLE_OFFSET = parseInt(process.env.BACKTEST_OFFSET ?? '0')
 const BACKTEST_TRAILING = process.env.BACKTEST_TRAILING === 'true'
-const TRAILING_ACTIVATE = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE ?? '1.0')
-const TRAILING_DISTANCE = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE ?? '0.5')
+const TRAILING_ACTIVATE = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE ?? '0.5')
+const TRAILING_DISTANCE = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE ?? '0.3')
 const AI_SKIP_RATE = parseFloat(process.env.BACKTEST_AI_SKIP_RATE ?? '1.0')
 
 const CACHE_FILE = './logs/candle_cache.json'
@@ -183,7 +183,7 @@ function evaluate(params) {
 	const noRsiFilter = process.env.BACKTEST_NO_RSI_FILTER === 'true'
 	const noEmaFilter = process.env.BACKTEST_NO_EMA_FILTER === 'true'
 
-	const trendMode = process.env.BACKTEST_TREND_MODE || 'OR'
+	const trendMode = process.env.BACKTEST_TREND_MODE || 'AND'
 	const downtrend = cfg.trendRequired
 		? h4Trend === 'bearish' && belowEma50 && h1Trend === 'bearish'
 		: trendMode === 'AND'

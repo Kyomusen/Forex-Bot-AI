@@ -41,7 +41,6 @@ jobs:
         id: knowledge-cache
         with:
           path: |
-            logs/knowledge.md
             logs/trade_history.json
             logs/filter_knowledge.json
             logs/filter_wisdom.md

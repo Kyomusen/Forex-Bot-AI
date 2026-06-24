@@ -604,12 +604,6 @@ async function runBacktest() {
 			positions[sym] = null
 			trades[sym] = []
 		}
-		const consecutiveLosses = {}
-		const cooldownCounters = {}
-		for (const sym of activeSymbols) { consecutiveLosses[sym] = 0; cooldownCounters[sym] = 0 }
-		const consecutiveSkip = parseInt(process.env.BACKTEST_CONSECUTIVE_SKIP ?? '0')
-		const consecutiveCooldown = parseInt(process.env.BACKTEST_CONSECUTIVE_COOLDOWN ?? '3')
-
 		let aiFilteredMap = {}
 		if (USE_AI) {
 			const result = await runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart, segEnd)
@@ -659,35 +653,6 @@ async function runBacktest() {
 						}
 					}
 				}
-				// === Partial TP check ===
-				if (pos.partialTp && !pos.partialFilled && pos.atrValue > 0) {
-					const candleHigh = getHigh(h1[i])
-					const candleLow = getLow(h1[i])
-					const partialHit = pos.type === 'BUY' ? candleHigh >= pos.partialTp : candleLow <= pos.partialTp
-					if (partialHit) {
-						const partialPnlMultiplier = pos.type === 'BUY' ? 1 : -1
-						const partialPnlPips = (pos.partialTp - pos.entry) / pipToPrice(1, sym)
-						const spreadPips = parseFloat(process.env.BACKTEST_SPREAD_PIPS ?? '0')
-						const partialSize = pos.size * (parseFloat(process.env.BACKTEST_PARTIAL_TP_SIZE ?? '0.5'))
-						const remainingSize = pos.size - partialSize
-						const partialSpread = spreadPips * partialSize * pipValuePerLot(sym)
-						const partialPnl = partialPnlPips * partialSize * pipValuePerLot(sym) * partialPnlMultiplier - partialSpread
-						balances[sym] += partialPnl
-						const prevSize = pos.size
-						pos.size = remainingSize
-						pos.partialFilled = true
-						trades[sym].push({
-							symbol: sym, type: pos.type, setup: pos.setup, entry: pos.entry,
-							exit: pos.partialTp, pnl: parseFloat(partialPnl.toFixed(2)), result: 'PARTIAL',
-							exitTime: current.snapshotTime ?? i, entryTime: pos.entryTime,
-							bars: i - pos.entryIdx, reason: pos.reason, confidence: pos.confidence,
-							slPips: Math.round(Math.abs(pos.sl - pos.entry) / pipToPrice(1, sym)),
-							tpPips: Math.round(Math.abs(pos.tp - pos.entry) / pipToPrice(1, sym)),
-							exitReason: 'PARTIAL_TP',
-						})
-						console.log(`  [Partial TP] ${sym} ${(partialSize/prevSize*100).toFixed(0)}% @ ${pos.partialTp} PnL=$${partialPnl.toFixed(2)}`)
-					}
-				}
 				const result = checkPosition(pos, h1, pos.entryIdx + 1, i + 1)
 				if (result) {
 					const multiplier = pos.type === 'BUY' ? 1 : -1
@@ -718,10 +683,6 @@ async function runBacktest() {
 					if (currentTotal > peakTotal) peakTotal = currentTotal
 					const dd = ((peakTotal - currentTotal) / peakTotal) * 100
 					if (dd > maxDD) maxDD = dd
-					if (consecutiveSkip > 0) {
-						if (pnl >= 0) { consecutiveLosses[sym] = 0; cooldownCounters[sym] = 0 }
-						else consecutiveLosses[sym]++
-					}
 				} else if (i >= minLen - 1) {
 					trades[sym].push({
 						symbol: sym, type: pos.type, setup: pos.setup, entry: pos.entry,
@@ -735,13 +696,6 @@ async function runBacktest() {
 			}
 
 			if (isDDDisabled(sym, balances)) continue
-
-			if (consecutiveSkip > 0 && consecutiveLosses[sym] >= consecutiveSkip) {
-				cooldownCounters[sym]++
-				if (cooldownCounters[sym] < consecutiveCooldown) continue
-				consecutiveLosses[sym] = 0
-				cooldownCounters[sym] = 0
-			}
 
 			const window = h1.slice(0, i + 1)
 			const sw = h1.slice(Math.max(0, i - 95), i + 1)
@@ -783,12 +737,6 @@ async function runBacktest() {
 			const size = calcSize(balances[sym], slPips, sym)
 			if (!size) continue
 
-			const partialTpRatio = parseFloat(process.env.BACKTEST_PARTIAL_TP_RATIO ?? '0')
-			const partialTpPips = partialTpRatio > 0 ? Math.round(tpPips * partialTpRatio) : 0
-			const partialTpPrice = partialTpPips > 0
-				? (finalAction === 'BUY' ? entryPrice + partialTpPips * pipToPrice(1, sym) : entryPrice - partialTpPips * pipToPrice(1, sym))
-				: null
-
 			positions[sym] = {
 				type: finalAction, entry: entryPrice, sl: slPrice, tp: tpPrice,
 				size, entryIdx: i, entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
@@ -796,8 +744,6 @@ async function runBacktest() {
 				atrValue: atrVal,
 				bestPrice: entryPrice,
 				trailingActivated: false,
-				partialTp: partialTpPrice,
-				partialFilled: false,
 			entryIndicators: mainInd ? {
 				rsi: mainInd.rsi,
 				ema20: mainInd.ema20,

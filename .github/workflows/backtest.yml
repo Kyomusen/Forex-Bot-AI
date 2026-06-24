@@ -31,6 +31,10 @@ on:
         description: 'Run AI learn after backtest (true/false)'
         required: true
         default: 'true'
+      ai_skip_rate:
+        description: 'AI skip analysis sample rate (0=disabled, 0.3=30%)'
+        required: true
+        default: '0'
       setups:
         description: 'Allowed setups (comma-separated)'
         required: true
@@ -110,6 +114,7 @@ jobs:
           BACKTEST_RANDOM_SIGNALS: ${{ github.event.inputs.random_signals }}
           BACKTEST_SEGMENTS: ${{ github.event.inputs.segments }}
           BACKTEST_LEARN: ${{ github.event.inputs.learn }}
+          BACKTEST_AI_SKIP_RATE: ${{ github.event.inputs.ai_skip_rate }}
           BACKTEST_TF: 'HOUR'
           BACKTEST_SETUPS: ${{ github.event.inputs.setups }}
           BACKTEST_NO_MACD_FILTER: 'true'

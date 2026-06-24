@@ -4,7 +4,7 @@ import { createSession, getCandles } from './capitalClient.js'
 import { getIndicators, getMultiTFIndicators } from './indicators.js'
 import { sendBacktestReport, sendBatchNotification } from './discordNotifier.js'
 import { recordTrades, shouldSkipSetup, printSummary } from './backtestLearning.js'
-import { waitForAISlot, recordAICall } from './aiDecision.js'
+import { waitForAISlot, recordAICall, getBatchSkipPrediction } from './aiDecision.js'
 import { recordTradeResult, querySimilarTrades } from './filterLearning.js'
 import { saveWisdom, getWisdomForPrompt } from './filterWisdom.js'
 import { aiLearnFromTrades, getLearnedRulesForPrompt, getSLTPAdjustment } from './aiLearn.js'
@@ -22,6 +22,7 @@ const SL_PIPS_DEFAULT = parseInt(process.env.BACKTEST_SL_PIPS ?? '15')
 const TP_PIPS_DEFAULT = parseInt(process.env.BACKTEST_TP_PIPS ?? '30')
 const TREND_TF = TF === 'HOUR' ? 'HOUR_4' : 'DAY'
 const CANDLE_OFFSET = parseInt(process.env.BACKTEST_OFFSET ?? '0')
+const AI_SKIP_RATE = parseFloat(process.env.BACKTEST_AI_SKIP_RATE ?? '0')
 
 const CACHE_FILE = './logs/candle_cache.json'
 
@@ -604,6 +605,8 @@ async function runBacktest() {
 			positions[sym] = null
 			trades[sym] = []
 		}
+		const signalLog = []
+		let autoSkipCount = 0
 		let aiFilteredMap = {}
 		if (USE_AI) {
 			const result = await runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart, segEnd)
@@ -678,6 +681,10 @@ async function runBacktest() {
 						aiDecision: USE_AI ? 'PROCEED' : 'NONE',
 						slPips, tpPips, exitReason: result.type,
 					})
+					if (AI_SKIP_RATE > 0 && pos.signalIndex != null && signalLog[pos.signalIndex]) {
+						signalLog[pos.signalIndex].tradeResult = pnl >= 0 ? 'WIN' : 'LOSS'
+						signalLog[pos.signalIndex].pnl = parseFloat(pnl.toFixed(2))
+					}
 					positions[sym] = null
 					const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
 					if (currentTotal > peakTotal) peakTotal = currentTotal
@@ -719,6 +726,33 @@ async function runBacktest() {
 			const entryReason = ruleDecision.reason
 			const entryConf = ruleDecision.confidence
 
+			// Signal logging + Auto-SKIP for AI skip analysis
+			const signalEntry = {
+				index: signalLog.length,
+				symbol: sym, action: finalAction, setup: setupName,
+				price, rsi: mainInd?.rsi, emaTrend: mainInd?.emaTrend, h4Trend,
+				pastSimilarWinRate: null,
+				tradeResult: null, pnl: null,
+				autoSkipped: false,
+			}
+			if (AI_SKIP_RATE > 0) {
+				const patterns = querySimilarTrades({
+					symbol: sym, setup: setupName,
+					rsi: mainInd?.rsi ?? 50,
+					macdHistogramTrend: mainInd?.macd?.histogramTrend ?? 'neutral',
+				})
+				signalEntry.pastSimilarWinRate = patterns?.winRate ?? null
+				if (patterns && patterns.total >= 3 && patterns.winRate < 0.35) {
+					signalEntry.autoSkipped = true
+					signalEntry.tradeResult = 'AUTO_SKIP'
+					signalLog.push(signalEntry)
+					autoSkipCount++
+					console.log(`[Auto-SKIP] ${sym} ${finalAction} past ${patterns.total} similar WR ${(patterns.winRate*100).toFixed(0)}%`)
+					continue
+				}
+			}
+			signalLog.push(signalEntry)
+
 			const atrVal = mainInd?.atr ?? 0
 			let { slPips, tpPips } = atrParams(atrVal, sym)
 			// Apply learned SL/TP adjustments (from AI learning)
@@ -744,6 +778,7 @@ async function runBacktest() {
 				atrValue: atrVal,
 				bestPrice: entryPrice,
 				trailingActivated: false,
+				signalIndex: signalEntry.index,
 			entryIndicators: mainInd ? {
 				rsi: mainInd.rsi,
 				ema20: mainInd.ema20,
@@ -775,6 +810,60 @@ async function runBacktest() {
 		const segClosed = segAllTrades.filter(t => t.result !== 'UNKNOWN')
 		console.log(`➡️  Segment ${seg + 1}: $${segPnl >= 0 ? '+' : ''}${segPnl.toFixed(2)} | ${segClosed.length} trades | WR: ${segClosed.length > 0 ? (segClosed.filter(t => t.result === 'WIN').length / segClosed.length * 100).toFixed(1) : 'N/A'}%`)
 	} // end segment loop
+
+	// === Post-hoc AI skip analysis ===
+	const aiSkipResults = []
+	if (AI_SKIP_RATE > 0) {
+		const tradedSignals = signalLog.filter(s => s.tradeResult === 'WIN' || s.tradeResult === 'LOSS')
+		const sampled = tradedSignals.filter(() => Math.random() < AI_SKIP_RATE)
+		if (sampled.length > 0) {
+			console.log(`\n[AI Skip] Sending ${sampled.length}/${tradedSignals.length} signals to AI (rate=${AI_SKIP_RATE})...`)
+			try {
+				const predictions = await getBatchSkipPrediction(sampled)
+				for (const p of predictions) {
+					const signal = sampled.find(s => s.index === p.index)
+					if (!signal) continue
+					aiSkipResults.push({
+						...signal,
+						aiDecision: p.decision,
+						aiConfidence: p.confidence,
+						aiCorrect: (p.decision === 'SKIP' && signal.tradeResult === 'LOSS') ||
+							(p.decision === 'PROCEED' && signal.tradeResult === 'WIN'),
+					})
+				}
+			} catch (err) {
+				console.error('[AI Skip] error:', err.message)
+			}
+		}
+
+		if (aiSkipResults.length > 0) {
+			const aiSkipped = aiSkipResults.filter(r => r.aiDecision === 'SKIP')
+			const aiProceed = aiSkipResults.filter(r => r.aiDecision === 'PROCEED')
+			const correctSkip = aiSkipped.filter(r => r.tradeResult === 'LOSS').length
+			const falseSkip = aiSkipped.filter(r => r.tradeResult === 'WIN').length
+			const correctProceed = aiProceed.filter(r => r.tradeResult === 'WIN').length
+			const falseProceed = aiProceed.filter(r => r.tradeResult === 'LOSS').length
+			const aiAccuracy = aiSkipResults.filter(r => r.aiCorrect).length / aiSkipResults.length * 100
+			const skippedLossPnl = aiSkipped.filter(r => r.tradeResult === 'LOSS').reduce((s, r) => s + Math.abs(r.pnl || 0), 0)
+			const skippedWinPnl = aiSkipped.filter(r => r.tradeResult === 'WIN').reduce((s, r) => s + (r.pnl || 0), 0)
+
+			console.log(`\n${'='.repeat(60)}`)
+			console.log(`📊 AI Skip Analysis (sampled ${aiSkipResults.length}/${tradedSignals.length} signals)`)
+			console.log(`${'='.repeat(60)}`)
+			console.log(`Auto-SKIP (past WR<35%): ${autoSkipCount} trades skipped`)
+			console.log(`AI Accuracy: ${aiAccuracy.toFixed(1)}% (${aiSkipResults.filter(r => r.aiCorrect).length}/${aiSkipResults.length})`)
+			console.log(`\nAI said SKIP: ${aiSkipped.length} times`)
+			console.log(`  ✓ Correct (was LOSS): ${correctSkip} (${correctSkip > 0 ? (correctSkip/aiSkipped.length*100).toFixed(1) : 0}%)`)
+			console.log(`  ✗ False (was WIN): ${falseSkip} — กำไรที่พลาด: $${skippedWinPnl.toFixed(2)}`)
+			console.log(`  💰 Loss ที่หลีกเลี่ยง: $${skippedLossPnl.toFixed(2)}`)
+			console.log(`\nAI said PROCEED: ${aiProceed.length} times`)
+			console.log(`  ✓ Correct (was WIN): ${correctProceed}`)
+			console.log(`  ✗ False (was LOSS): ${falseProceed}`)
+			const netAIBenefit = skippedLossPnl - skippedWinPnl
+			console.log(`\n💵 Net AI benefit (loss avoided - profit missed): ${netAIBenefit >= 0 ? '+' : ''}$${netAIBenefit.toFixed(2)}`)
+			console.log(`${'='.repeat(60)}\n`)
+		}
+	}
 
 	const finalBalance = BALANCE_PER_SYMBOL * activeSymbols.length + cumProfit
 	const allTrades = Object.values(allSegmentTrades).flat()

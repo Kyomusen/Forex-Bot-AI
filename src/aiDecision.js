@@ -400,4 +400,36 @@ async function getAIFilter(params) {
 	return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
 }
 
+export async function getBatchSkipPrediction(signals) {
+	if (!signals || signals.length === 0) return []
+
+	const hasSlot = await waitForAISlot()
+	if (!hasSlot) {
+		return signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
+	}
+
+	const lines = signals.map(s =>
+		`Signal#${s.index} ${s.action} ${s.symbol} ${s.setup} Price=${s.price} RSI=${s.rsi != null ? s.rsi.toFixed(1) : '?'} Trend=${s.emaTrend} H4=${s.h4Trend} S/R_ATR=${s.srAtrRatio != null ? s.srAtrRatio.toFixed(2) : '?'} PastWR=${s.pastSimilarWinRate != null ? (s.pastSimilarWinRate * 100).toFixed(0) + '%' : '?'}`
+	).join('\n')
+
+	const prompt = `Analyze these forex signals. Which will likely LOSE? Respond "SKIP" if expected to lose, "PROCEED" otherwise. Be aggressive with SKIP only when confident of loss.
+
+${lines}
+
+Respond JSON array only (no markdown):
+[{index:0,decision:"PROCEED",confidence:0.9},{index:1,decision:"SKIP",confidence:0.7},...]`
+
+	try {
+		const result = await model.generateContent(prompt)
+		recordAICall()
+		const text = result.response.text()
+		const cleaned = text.replace(/```json|```/g, '').trim()
+		const parsed = JSON.parse(cleaned)
+		return Array.isArray(parsed) ? parsed : signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
+	} catch (err) {
+		console.error('[AI] batch skip error:', err.message)
+		return signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
+	}
+}
+
 export { getAIDecision, getAIConditionalOrders, getAIFilter, waitForAISlot }

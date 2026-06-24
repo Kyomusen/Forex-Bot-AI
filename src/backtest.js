@@ -582,6 +582,8 @@ async function runBacktest() {
 
 	const allSegmentTrades = {}
 	for (const sym of activeSymbols) allSegmentTrades[sym] = []
+	const signalLog = []
+	let autoSkipCount = 0
 	let cumProfit = 0
 	let segAiCalls = 0
 	let globalMaxDD = 0
@@ -605,8 +607,6 @@ async function runBacktest() {
 			positions[sym] = null
 			trades[sym] = []
 		}
-		const signalLog = []
-		let autoSkipCount = 0
 		let aiFilteredMap = {}
 		if (USE_AI) {
 			const result = await runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart, segEnd)

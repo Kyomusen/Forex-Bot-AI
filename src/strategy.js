@@ -114,11 +114,11 @@ export function evaluate(params) {
 
 	const downtrend = cfg.trendRequired
 		? h4Trend === 'bearish' && belowEma50 && h1Trend === 'bearish'
-		: (h4Trend === 'bearish' || belowEma50)
+		: (h4Trend === 'bearish' && belowEma50)
 
 	const uptrend = cfg.trendRequired
 		? h4Trend === 'bullish' && aboveEma50 && h1Trend === 'bullish'
-		: (h4Trend === 'bullish' || aboveEma50)
+		: (h4Trend === 'bullish' && aboveEma50)
 
 	const candidates = []
 

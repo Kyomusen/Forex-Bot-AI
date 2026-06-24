@@ -179,11 +179,11 @@ function evaluate(params) {
 
 	const downtrend = cfg.trendRequired
 		? h4Trend === 'bearish' && belowEma50 && h1Trend === 'bearish'
-		: (h4Trend === 'bearish' || belowEma50)
+		: (h4Trend === 'bearish' && belowEma50)
 
 	const uptrend = cfg.trendRequired
 		? h4Trend === 'bullish' && aboveEma50 && h1Trend === 'bullish'
-		: (h4Trend === 'bullish' || aboveEma50)
+		: (h4Trend === 'bullish' && aboveEma50)
 
 	const activeSetups = process.env.BACKTEST_SETUPS
 		? process.env.BACKTEST_SETUPS.split(',')
@@ -615,6 +615,40 @@ async function runBacktest() {
 			const pos = positions[sym]
 
 			if (pos) {
+				// === Trailing Stop ===
+				if (pos.atrValue > 0 && process.env.BACKTEST_TRAILING === 'true') {
+					const candleHigh = getHigh(h1[i])
+					const candleLow = getLow(h1[i])
+					const trailingActivate = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE || '1.0')
+					const trailingDist = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE || '0.5')
+					if (pos.type === 'BUY') {
+						if (candleHigh > pos.bestPrice) pos.bestPrice = candleHigh
+						const profit = pos.bestPrice - pos.entry
+						if (profit >= trailingActivate * pos.atrValue) {
+							const newSl = Math.max(pos.sl, pos.bestPrice - trailingDist * pos.atrValue)
+							if (newSl > pos.sl) {
+								pos.sl = newSl
+								if (!pos.trailingActivated) {
+									pos.trailingActivated = true
+									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
+								}
+							}
+						}
+					} else {
+						if (candleLow < pos.bestPrice) pos.bestPrice = candleLow
+						const profit = pos.entry - pos.bestPrice
+						if (profit >= trailingActivate * pos.atrValue) {
+							const newSl = Math.min(pos.sl, pos.bestPrice + trailingDist * pos.atrValue)
+							if (newSl < pos.sl) {
+								pos.sl = newSl
+								if (!pos.trailingActivated) {
+									pos.trailingActivated = true
+									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
+								}
+							}
+						}
+					}
+				}
 				const result = checkPosition(pos, h1, pos.entryIdx + 1, i + 1)
 				if (result) {
 					const multiplier = pos.type === 'BUY' ? 1 : -1
@@ -703,6 +737,9 @@ async function runBacktest() {
 				type: finalAction, entry: entryPrice, sl: slPrice, tp: tpPrice,
 				size, entryIdx: i, entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
 				setup: setupName, reason: entryReason, confidence: entryConf,
+				atrValue: atrVal,
+				bestPrice: entryPrice,
+				trailingActivated: false,
 			entryIndicators: mainInd ? {
 				rsi: mainInd.rsi,
 				ema20: mainInd.ema20,

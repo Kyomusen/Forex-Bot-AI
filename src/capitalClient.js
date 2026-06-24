@@ -140,6 +140,17 @@ async function openPosition({ epic, direction, size, stopLevel, profitLevel }) {
 	return res.data
 }
 
+async function updatePosition(dealId, { stopLevel, profitLevel }) {
+	await ensureSession()
+	const body = {}
+	if (stopLevel != null) body.stopLevel = stopLevel
+	if (profitLevel != null) body.profitLevel = profitLevel
+	const res = await axios.put(`${BASE_URL}/positions/${dealId}`, body, {
+		headers: getAuthHeaders(),
+	})
+	return res.data
+}
+
 async function closePosition(dealId) {
 	await ensureSession()
 	const res = await axios.delete(`${BASE_URL}/positions/${dealId}`, {
@@ -197,6 +208,7 @@ export {
 	getCandles,
 	getOpenPositions,
 	openPosition,
+	updatePosition,
 	closePosition,
 	getMarketInfo,
 	createWorkingOrder,

@@ -1,6 +1,6 @@
 import cron from 'node-cron'
 import dotenv from 'dotenv'
-import { createSession, getCandles, getOpenPositions, toEpic } from './capitalClient.js'
+import { createSession, getCandles, getOpenPositions, updatePosition, toEpic } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
 import { getAIFilter, getAIConditionalOrders } from './aiDecision.js'
 import { checkNews } from './newsFilter.js'
@@ -57,6 +57,48 @@ const TF_MINUTES = {
 	'HOUR':      60,
 	'HOUR_4':    240,
 	'DAY':       1440,
+}
+
+async function checkTrailingStops() {
+	if (process.env.BACKTEST_TRAILING !== 'true') return
+	const trailingActivate = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE || '1.0')
+	const trailingDist = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE || '0.5')
+	try {
+		const positions = await getOpenPositions()
+		if (!positions || positions.length === 0) return
+		// Build entryMap from trade history by matching on dealId
+		const hist = (await import('./tradeHistory.js')).loadHistory()
+		const entryMap = {}
+		for (const t of hist) {
+			if (t.dealId && t.indicators?.atr) entryMap[t.dealId] = t
+		}
+		for (const p of positions) {
+			const dealId = p.position?.dealId
+			if (!dealId) continue
+			const entry = entryMap[dealId]
+			if (!entry?.indicators?.atr) continue
+			const entryPrice = entry.entry
+			const atrVal = entry.indicators.atr
+			const isBuy = entry.action === 'BUY'
+			const currentPrice = p.market?.bid ?? (isBuy ? p.market?.offer : p.market?.bid)
+			if (!currentPrice) continue
+			const profit = isBuy ? currentPrice - entryPrice : entryPrice - currentPrice
+			if (profit >= trailingActivate * atrVal) {
+				const bestPrice = isBuy ? Math.max(entryPrice, currentPrice, (p.position?.level || entryPrice)) : Math.min(entryPrice, currentPrice, (p.position?.level || entryPrice))
+				const newSl = isBuy
+					? parseFloat((bestPrice - trailingDist * atrVal).toFixed(5))
+					: parseFloat((bestPrice + trailingDist * atrVal).toFixed(5))
+				const currentSl = p.position?.stopLevel
+				if (!currentSl) continue
+				if ((isBuy && newSl > currentSl) || (!isBuy && newSl < currentSl)) {
+					console.log(`[Trailing] ${entry.symbol} ${dealId} update SL ${currentSl}→${newSl}`)
+					await updatePosition(dealId, { stopLevel: newSl })
+				}
+			}
+		}
+	} catch (err) {
+		console.error('[Trailing] error:', err.message)
+	}
 }
 
 function getNextCandleTime(tf) {
@@ -173,8 +215,11 @@ async function runAllCycles() {
 		}
 	}
 
-	// Phase 2: Indicator → AI filter → News → Place order
-	console.log('[Bot] Phase 2: วิเคราะห์ Indicator...')
+	// Phase 2: Trailing stop check for open positions
+	await checkTrailingStops()
+
+	// Phase 3: Indicator → AI filter → News → Place order
+	console.log('[Bot] Phase 3: วิเคราะห์ Indicator...')
 	const results = []
 
 	for (const symbol of SYMBOLS) {
@@ -324,7 +369,7 @@ async function runAllCycles() {
 		}
 	}
 
-	// Phase 3: AI Conditional Orders (for symbols without immediate trades)
+	// Phase 4: AI Conditional Orders (for symbols without immediate trades)
 	const tradedSymbols = new Set(results.filter(r => r.status === 'OK').map(r => r.symbol))
 	const conditionalSymbols = SYMBOLS.filter(s => !tradedSymbols.has(s))
 	if (conditionalSymbols.length > 0 && !PAPER_TRADING) {

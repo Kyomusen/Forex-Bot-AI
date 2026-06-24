@@ -1,8 +1,6 @@
 name: Forex Bot
 
 on:
-  schedule:
-    - cron: '3 * * * *'  # every hour at :03 (after HOUR candle closes)
   workflow_dispatch:
 
 jobs:
@@ -69,7 +67,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FALLBACK_GEMINI_API_KEY: ${{ secrets.FALLBACK_GEMINI_API_KEY }}
           FALLBACK_GEMINI_API_KEY_2: ${{ secrets.FALLBACK_GEMINI_API_KEY_2 }}
-          SYMBOLS: ${{ secrets.SYMBOLS }}
+          SYMBOLS: 'XAUUSD'
           TIMEFRAME: 'HOUR'
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ACCOUNT_BALANCE: ${{ secrets.ACCOUNT_BALANCE }}

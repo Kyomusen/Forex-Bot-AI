@@ -115,10 +115,6 @@ jobs:
           BACKTEST_NO_MACD_FILTER: 'true'
           BACKTEST_NO_RSI_FILTER: 'true'
           BACKTEST_NO_EMA_FILTER: 'true'
-          BACKTEST_ATR_SL: '1.0'
-          BACKTEST_ATR_TP: '4.0'
-          BACKTEST_RISK: '1'
-          BACKTEST_SPREAD_PIPS: '0.4'
           BACKTEST_TREND_MODE: ${{ github.event.inputs.trend_mode }}
           BACKTEST_SR_ATR: ${{ github.event.inputs.sr_atr }}
           BACKTEST_TRAILING: ${{ github.event.inputs.trailing }}

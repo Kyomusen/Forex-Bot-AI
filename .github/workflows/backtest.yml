@@ -31,6 +31,22 @@ on:
         description: 'Run AI learn after backtest (true/false)'
         required: true
         default: 'true'
+      consecutive_skip:
+        description: 'Skip after N consecutive losses (0=disable)'
+        required: true
+        default: '0'
+      consecutive_cooldown:
+        description: 'Cooldown candles after skip'
+        required: true
+        default: '3'
+      partial_tp_ratio:
+        description: 'Partial TP as fraction of full TP (0=disable)'
+        required: true
+        default: '0'
+      partial_tp_size:
+        description: 'Fraction of position to close at partial TP'
+        required: true
+        default: '0.5'
       setups:
         description: 'Allowed setups (comma-separated)'
         required: true
@@ -122,6 +138,10 @@ jobs:
           BACKTEST_TRAILING_DISTANCE: ${{ github.event.inputs.trailing_distance }}
           BACKTEST_ATR_SL: ${{ github.event.inputs.atr_sl }}
           BACKTEST_ATR_TP: ${{ github.event.inputs.atr_tp }}
+          BACKTEST_CONSECUTIVE_SKIP: ${{ github.event.inputs.consecutive_skip }}
+          BACKTEST_CONSECUTIVE_COOLDOWN: ${{ github.event.inputs.consecutive_cooldown }}
+          BACKTEST_PARTIAL_TP_RATIO: ${{ github.event.inputs.partial_tp_ratio }}
+          BACKTEST_PARTIAL_TP_SIZE: ${{ github.event.inputs.partial_tp_size }}
           BACKTEST_RISK: ${{ github.event.inputs.risk }}
           BACKTEST_SPREAD_PIPS: ${{ github.event.inputs.spread }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

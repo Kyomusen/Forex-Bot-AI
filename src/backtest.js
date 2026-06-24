@@ -757,9 +757,12 @@ async function runBacktest() {
 			const ruleDecision = evaluate({ symbol: sym, h4Trend, ind: mainInd, knowledge: true })
 			if (!ruleDecision || ruleDecision.action === 'HOLD') continue
 
-			// Logic self-learned pre-filter (no API cost)
-			const logicCheck = queryLogicRules(sym, { setup: ruleDecision.setup, rsi: mainInd?.rsi })
-			if (logicCheck.action === 'SKIP') continue
+			// Logic self-learned pre-filter (no API cost) — only when learning enabled
+			let logicCheck = { action: 'PROCEED' }
+			if (process.env.BACKTEST_LEARN === 'true') {
+				logicCheck = queryLogicRules(sym, { setup: ruleDecision.setup, rsi: mainInd?.rsi })
+				if (logicCheck.action === 'SKIP') continue
+			}
 
 			if (USE_AI) {
 				const filterAction = aiFilteredMap[sym]?.[i]
@@ -782,17 +785,19 @@ async function runBacktest() {
 
 			const atrVal = mainInd?.atr ?? 0
 			let { slPips, tpPips } = atrParams(atrVal, sym)
-			// Apply combined SL/TP adjustments: AI learned + logic learned
-			const aiAdj = getSLTPAdjustment(sym)
-			const logicAdj = logicCheck.slMultiplier ? { slMultiplier: logicCheck.slMultiplier, tpMultiplier: logicCheck.tpMultiplier } : { slMultiplier: 1.0, tpMultiplier: 1.0 }
-			const finalSlM = parseFloat(((aiAdj.slMultiplier ?? 1.0) * (logicAdj.slMultiplier ?? 1.0)).toFixed(2))
-			const finalTpM = parseFloat(((aiAdj.tpMultiplier ?? 1.0) * (logicAdj.tpMultiplier ?? 1.0)).toFixed(2))
-			if (finalSlM !== 1.0 || finalTpM !== 1.0) {
-				const oldSl = slPips; const oldTp = tpPips
-				slPips = Math.max(5, Math.round(slPips * finalSlM))
-				tpPips = Math.max(10, Math.round(tpPips * finalTpM))
-				if (oldSl !== slPips || oldTp !== tpPips) {
-					console.log(`[Adjust] ${sym} SL:${oldSl}→${slPips} TP:${oldTp}→${tpPips} (AI ${aiAdj.slMultiplier ?? 1.0}x logic ${logicAdj.slMultiplier ?? 1.0}x)`)
+			// SL/TP adjustments only when learning enabled
+			if (process.env.BACKTEST_LEARN === 'true') {
+				const aiAdj = getSLTPAdjustment(sym)
+				const logicAdj = logicCheck.slMultiplier ? { slMultiplier: logicCheck.slMultiplier, tpMultiplier: logicCheck.tpMultiplier } : { slMultiplier: 1.0, tpMultiplier: 1.0 }
+				const finalSlM = parseFloat(((aiAdj.slMultiplier ?? 1.0) * (logicAdj.slMultiplier ?? 1.0)).toFixed(2))
+				const finalTpM = parseFloat(((aiAdj.tpMultiplier ?? 1.0) * (logicAdj.tpMultiplier ?? 1.0)).toFixed(2))
+				if (finalSlM !== 1.0 || finalTpM !== 1.0) {
+					const oldSl = slPips; const oldTp = tpPips
+					slPips = Math.max(5, Math.round(slPips * finalSlM))
+					tpPips = Math.max(10, Math.round(tpPips * finalTpM))
+					if (oldSl !== slPips || oldTp !== tpPips) {
+						console.log(`[Adjust] ${sym} SL:${oldSl}→${slPips} TP:${oldTp}→${tpPips} (AI ${aiAdj.slMultiplier ?? 1.0}x logic ${logicAdj.slMultiplier ?? 1.0}x)`)
+					}
 				}
 			}
 			const entryPrice = price

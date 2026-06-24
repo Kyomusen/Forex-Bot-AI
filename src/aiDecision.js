@@ -277,7 +277,7 @@ async function getAIConditionalOrders(allData, learningHistory, knowledgeMd) {
 	}
 }
 
-function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patterns, wisdom }) {
+function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patterns, wisdom, slPips, tpPips }) {
 	const { rsi, ema20, ema50, emaTrend, macd, atr, currentPrice } = marketData || {}
 	const macdHist = macd?.histogram ?? 0
 	const macdHistTrend = macd?.histogramTrend ?? 'neutral'
@@ -317,18 +317,36 @@ Price vs EMA20: ${pricePos} | EMA Trend: ${emaTrend}
 MACD Histogram: ${macdHist.toFixed(5)} (${macdHistTrend})
 ATR: ${atr?.toFixed(5)}${learningSection}${wisdomSection}${learnedSection}
 
+Current SL: ${slPips}pips | TP: ${tpPips}pips (default values from indicator)
+
+Also suggest SL/TP adjustments based on past trade outcomes:
+- "tight" (0.7x): reduce SL/TP distance when market is choppy or SL gets hit too often
+- "normal" (1.0x): keep default
+- "wide" (1.3x): widen SL/TP when trend is strong or TP consistently missed
+
+Past trade analysis should guide your choice: if similar trades often hit SL first, use "wide" SL; if they hit TP first, try "tight" TP.
+
 Respond ONLY valid JSON (no markdown):
-{"action":"PROCEED"|"SKIP","confidence":0-1,"reason":"brief reason"}`
+{"action":"PROCEED"|"SKIP","confidence":0-1,"slAdjustment":"normal","tpAdjustment":"normal","reason":"brief reason"}`
+}
+
+const ADJUSTMENT_MAP = { tight: 0.7, normal: 1.0, wide: 1.3 }
+
+function parseAdjustment(val) {
+	if (val == null) return 1.0
+	if (typeof val === 'number') return Math.max(0.5, Math.min(2.0, val))
+	const s = String(val).toLowerCase().trim()
+	return ADJUSTMENT_MAP[s] ?? 1.0
 }
 
 async function getAIFilter(params) {
 	const hasSlot = await waitForAISlot()
 	if (!hasSlot) {
 		console.warn(`[AI] ${params.symbol} rate limit timeout — default PROCEED`)
-		return { action: 'PROCEED', confidence: 0.5, reason: 'Rate limit timeout — auto PROCEED' }
+		return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, reason: 'Rate limit timeout — auto PROCEED' }
 	}
 
-	const { symbol, indicatorDecision, marketData } = params
+	const { symbol, indicatorDecision, marketData, slPips, tpPips } = params
 	const { action, setup, confidence } = indicatorDecision
 	const rsi = marketData?.rsi
 	const macdHistTrend = marketData?.macd?.histogramTrend
@@ -343,10 +361,10 @@ async function getAIFilter(params) {
 	// Auto-SKIP if past similar trades have low win rate
 	if (patterns && patterns.total >= 3 && patterns.winRate < 0.35) {
 		console.log(`[AI] ${symbol} auto-SKIP: past ${patterns.total} similar trades, WR ${(patterns.winRate * 100).toFixed(0)}%`)
-		return { action: 'SKIP', confidence: 0.4, reason: `Auto-skip: past ${patterns.total} similar trades had ${(patterns.winRate * 100).toFixed(0)}% win rate` }
+		return { action: 'SKIP', confidence: 0.4, slMultiplier: 1.0, tpMultiplier: 1.0, reason: `Auto-skip: past ${patterns.total} similar trades had ${(patterns.winRate * 100).toFixed(0)}% win rate` }
 	}
 
-	const prompt = buildFilterPrompt({ symbol, ...indicatorDecision, marketData, patterns, wisdom: getWisdomForPrompt(symbol, setup) })
+	const prompt = buildFilterPrompt({ symbol, ...indicatorDecision, marketData, patterns, wisdom: getWisdomForPrompt(symbol, setup), slPips, tpPips })
 
 	let lastError = null
 	for (let retry = 0; retry < 3; retry++) {
@@ -355,7 +373,14 @@ async function getAIFilter(params) {
 			recordAICall()
 			const text = result.response.text()
 			const cleaned = text.replace(/```json|```/g, '').trim()
-			return JSON.parse(cleaned)
+			const parsed = JSON.parse(cleaned)
+			return {
+				action: parsed.action ?? 'PROCEED',
+				confidence: parsed.confidence ?? 0.5,
+				slMultiplier: parseAdjustment(parsed.slAdjustment),
+				tpMultiplier: parseAdjustment(parsed.tpAdjustment),
+				reason: parsed.reason ?? '',
+			}
 		} catch (err) {
 			lastError = err
 			const status = String(err.status || err.code || err.message || '')
@@ -372,7 +397,7 @@ async function getAIFilter(params) {
 	}
 
 	console.error('[AI] filter error:', lastError?.message || 'unknown')
-	return { action: 'PROCEED', confidence: 0.5, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
+	return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
 }
 
 export { getAIDecision, getAIConditionalOrders, getAIFilter, waitForAISlot }

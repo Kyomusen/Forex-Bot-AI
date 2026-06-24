@@ -74,3 +74,6 @@ jobs:
           RISK_PERCENT: ${{ secrets.RISK_PERCENT }}
           PAPER_TRADING: 'false'  # set to 'true' for paper trading (no real orders)
           CAPITAL_DEMO: 'true'    # set to 'false' for live trading
+          BACKTEST_NO_MACD_FILTER: 'true'
+          BACKTEST_NO_RSI_FILTER: 'true'
+          BACKTEST_NO_EMA_FILTER: 'true'

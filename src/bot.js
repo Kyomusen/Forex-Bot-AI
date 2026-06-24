@@ -1,8 +1,8 @@
 import cron from 'node-cron'
 import dotenv from 'dotenv'
-import { createSession, getCandles, getOpenPositions } from './capitalClient.js'
+import { createSession, getCandles, getOpenPositions, toEpic } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
-import { getAIFilter } from './aiDecision.js'
+import { getAIFilter, getAIConditionalOrders } from './aiDecision.js'
 import { checkNews } from './newsFilter.js'
 import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition } from './orderManager.js'
@@ -12,7 +12,7 @@ import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from '
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
 import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
-import { loadPending, savePending, executePendingOrders, cleanExpired } from './pendingOrders.js'
+import { loadPending, savePending, placePendingOrder, syncWithCapital, cleanExpired, executePendingOrders } from './pendingOrders.js'
 import { recordTradeResult } from './filterLearning.js'
 
 dotenv.config()
@@ -89,71 +89,88 @@ async function runAllCycles() {
 	}
 	console.log(`[Bot] Candle ใหม่เริ่มแล้ว — ${new Date().toISOString()}`)
 
-	// Phase 1: Execute pending orders (fast, no AI)
-	console.log('[Bot] Phase 1: ตรวจสอบ Pending Orders...')
-	const allPending = cleanExpired(loadPending())
-	if (allPending.length > 0) {
-		const { executed, remaining } = executePendingOrders(allPending)
-		for (const order of executed) {
-			console.log(`[Bot] 🎯 ${order.symbol} เงื่อนไขตรง! ${order.entry_condition} (price=${order.triggeredPrice})`)
-			try {
-				const alreadyOpen = await hasOpenPosition(order.symbol)
-				if (alreadyOpen) {
-					console.log(`[Bot] ${order.symbol} มี position แล้ว — ข้าม`)
-					continue
-				}
-				const currentPrice = order.triggeredPrice
-				const orderParams = await buildOrderParams({
-					decision: {
-						action: order.action,
-						sl_pips: order.sl_pips,
-						tp_pips: order.tp_pips,
-						confidence: order.confidence || 0.7,
-					},
-					indicators: { currentPrice },
-					accountBalance: ACCOUNT_BALANCE,
+	// Phase 1: Sync triggered working orders from Capital.com
+	console.log('[Bot] Phase 1: ตรวจสอบ Working Orders ที่ถูก trigger...')
+	cleanExpired(loadPending()) // clean expired + cancel on Capital.com
+
+	if (PAPER_TRADING) {
+		// Paper mode: use local polling fallback
+		const allPending = loadPending()
+		if (allPending.length > 0) {
+			const { executed, remaining } = executePendingOrders(allPending)
+			for (const order of executed) {
+				console.log(`[Bot] 📝 ${order.symbol} PAPER pending trigger: ${order.entry_condition}`)
+				addTrade({
+					dealId: `paper-${Date.now()}-${order.symbol}`,
 					symbol: order.symbol,
+					action: order.action,
+					confidence: order.confidence || 0.7,
+					reason: `Paper Pending: ${order.reason || order.entry_condition}`,
+					entry: order.triggeredPrice,
+					sl_pips: order.sl_pips,
+					tp_pips: order.tp_pips,
+					paper: true,
 				})
-				if (orderParams) {
-					let result
-					if (PAPER_TRADING) {
-						result = { dealReference: `paper-${Date.now()}-${order.symbol}` }
-						console.log(`[Bot] ${order.symbol} 📝 PAPER — ${order.action}`)
-					} else {
-						result = await placeOrder(orderParams)
-					}
-					if (result) {
-						addTrade({
-							dealId: result.dealReference ?? null,
-							symbol: order.symbol,
-							action: order.action,
-							confidence: order.confidence || 0.7,
-							reason: `Pending: ${order.reason || order.entry_condition}`,
-							entry: currentPrice,
-							sl_pips: order.sl_pips,
-							tp_pips: order.tp_pips,
-							paper: PAPER_TRADING || undefined,
-						})
-						await sendOrderNotification({
-							action: order.action,
-							symbol: order.symbol,
-							size: orderParams.size,
-							entry: currentPrice,
-							sl: orderParams.stopLevel,
-							tp: orderParams.profitLevel,
-							confidence: order.confidence || 0.7,
-							reason: `Pending trigger: ${order.reason || order.entry_condition}`,
-							trend_alignment: 'aligned',
-							paper: PAPER_TRADING,
-						})
-					}
-				}
+				await sendOrderNotification({
+					action: order.action,
+					symbol: order.symbol,
+					size: '?',
+					entry: order.triggeredPrice,
+					sl: null,
+					tp: null,
+					confidence: order.confidence || 0.7,
+					reason: `Paper Pending Trigger: ${order.reason || order.entry_condition}`,
+					trend_alignment: 'aligned',
+					paper: true,
+				})
+			}
+			savePending(remaining)
+			console.log(`[Bot] Pending: ${executed.length} executed, ${remaining.length} remaining`)
+		}
+	} else {
+		const { triggered, remaining } = await syncWithCapital()
+		for (const order of triggered) {
+			console.log(`[Bot] 🎯 ${order.symbol} Working Order ถูก trigger แล้ว! (${order.orderType} ${order.action} @ ${order.level})`)
+			try {
+				// Check position is actually open
+				const positions = await getOpenPositions()
+				const pos = (positions || []).find(p =>
+					(p.market?.epic ?? '').toUpperCase() === toEpic(order.symbol).toUpperCase()
+				)
+				const entryPrice = pos?.position?.level || order.level
+				const posSize = pos?.position?.size
+				addTrade({
+					dealId: order.dealId,
+					symbol: order.symbol,
+					action: order.action,
+					confidence: order.confidence || 0.7,
+					reason: `Working Order Triggered: ${order.orderType} @ ${order.level} | ${order.reason || order.entry_condition}`,
+					entry: entryPrice,
+					sl_pips: order.sl_pips,
+					tp_pips: order.tp_pips,
+					paper: PAPER_TRADING || undefined,
+				})
+				await sendOrderNotification({
+					action: order.action,
+					symbol: order.symbol,
+					size: posSize ?? '?',
+					entry: entryPrice,
+					sl: null,
+					tp: null,
+					confidence: order.confidence || 0.7,
+					reason: `Working Order Triggered: ${order.orderType} @ ${order.level}`,
+					trend_alignment: 'aligned',
+					paper: PAPER_TRADING,
+				})
 			} catch (err) {
-				console.error(`[Bot] ${order.symbol} execute error:`, err.message)
+				console.error(`[Bot] ${order.symbol} sync trigger error:`, err.message)
+				remaining.push(order)
 			}
 		}
 		savePending(remaining)
-		console.log(`[Bot] Pending: ${executed.length} executed, ${remaining.length} remaining`)
+		if (triggered.length > 0) {
+			console.log(`[Bot] Pending: ${triggered.length} triggered, ${remaining.length} remaining`)
+		}
 	}
 
 	// Phase 2: Indicator → AI filter → News → Place order
@@ -219,7 +236,7 @@ async function runAllCycles() {
 			continue
 		}
 
-		const { action, setup, confidence, slPips, tpPips } = indicatorDecision
+		const { action, setup, confidence, slPips: baseSlPips, tpPips: baseTpPips } = indicatorDecision
 		console.log(`[Bot] ${symbol} indicator: ${action} (${setup}, ${(confidence * 100).toFixed(0)}%)`)
 
 		// Check for open position
@@ -229,14 +246,24 @@ async function runAllCycles() {
 			continue
 		}
 
-		// Step 2: AI filter (PROCEED/SKIP)
-		const aiResult = await getAIFilter({ symbol, indicatorDecision, marketData: mainInd })
+		// Step 2: AI filter (PROCEED/SKIP + SL/TP adjustment)
+		const aiResult = await getAIFilter({
+			symbol, indicatorDecision, marketData: mainInd,
+			slPips: baseSlPips, tpPips: baseTpPips,
+		})
 		if (aiResult.action === 'SKIP') {
 			console.log(`[Bot] ${symbol} AI filter: SKIP — ${aiResult.reason}`)
 			results.push({ symbol, action, status: 'SKIP', reason: `AI skip: ${(aiResult.reason || '').slice(0, 200)}` })
 			continue
 		}
 		console.log(`[Bot] ${symbol} AI filter: PROCEED (conf ${(aiResult.confidence * 100).toFixed(0)}%)`)
+
+		// Apply AI SL/TP adjustments
+		const slPips = Math.max(5, Math.round(baseSlPips * (aiResult.slMultiplier ?? 1.0)))
+		const tpPips = Math.max(10, Math.round(baseTpPips * (aiResult.tpMultiplier ?? 1.0)))
+		const slAdjLabel = (aiResult.slMultiplier ?? 1.0) < 0.85 ? 'tight' : (aiResult.slMultiplier ?? 1.0) > 1.15 ? 'wide' : 'normal'
+		const tpAdjLabel = (aiResult.tpMultiplier ?? 1.0) < 0.85 ? 'tight' : (aiResult.tpMultiplier ?? 1.0) > 1.15 ? 'wide' : 'normal'
+		console.log(`[Bot] ${symbol} AI SL:${slAdjLabel} (${baseSlPips}→${slPips}pips) TP:${tpAdjLabel} (${baseTpPips}→${tpPips}pips)`)
 
 		// Step 3: News filter
 		const newsResult = await checkNews(symbol)
@@ -297,6 +324,73 @@ async function runAllCycles() {
 		}
 	}
 
+	// Phase 3: AI Conditional Orders (for symbols without immediate trades)
+	const tradedSymbols = new Set(results.filter(r => r.status === 'OK').map(r => r.symbol))
+	const conditionalSymbols = SYMBOLS.filter(s => !tradedSymbols.has(s))
+	if (conditionalSymbols.length > 0 && !PAPER_TRADING) {
+		console.log('[Bot] Phase 3: AI Conditional Orders...')
+		try {
+			// Build allData from cached candle data collected during Phase 2
+			const allData = []
+			for (const symbol of conditionalSymbols) {
+				const candleMap = {}
+				let valid = true
+				for (const { tf, label } of TIMEFRAMES) {
+					const candles = getCached({ symbol, tf, candles: [] })
+					if (!candles || candles.length < 60) { valid = false; break }
+					candleMap[label] = candles
+				}
+				if (!valid) continue
+				const multiTFIndicators = getMultiTFIndicators(candleMap)
+				const mainInd = Object.values(multiTFIndicators)[0]
+				if (!mainInd || !mainInd.rsi || !mainInd.atr) continue
+				// Render chart for AI
+				const charts = {}
+				for (const { tf, label } of TIMEFRAMES) {
+					try {
+						const buf = await renderChart(candleMap[label], label)
+						if (buf) charts[label] = buf
+					} catch {}
+				}
+				allData.push({ symbol, indicators: multiTFIndicators, charts })
+			}
+
+			if (allData.length > 0) {
+				const learningHistory = getLearningHistory()
+				const knowledgeMd = loadKnowledge()
+				const conditionalOrders = await getAIConditionalOrders(allData, learningHistory, knowledgeMd)
+				for (const order of conditionalOrders || []) {
+					const indicators = allData.find(d => d.symbol === order.symbol)?.indicators
+					const mainInd = indicators ? Object.values(indicators)[0] : null
+					if (!mainInd) continue
+					if (await hasOpenPosition(order.symbol)) continue
+					// Check no duplicate pending order
+					const existing = loadPending().filter(p => p.symbol === order.symbol)
+					if (existing.length >= 2) continue
+					const placed = await placePendingOrder({
+						decision: {
+							action: order.action,
+							sl_pips: order.sl_pips,
+							tp_pips: order.tp_pips,
+							confidence: order.confidence || 0.7,
+						},
+						indicators: { currentPrice: mainInd.currentPrice },
+						accountBalance: ACCOUNT_BALANCE,
+						symbol: order.symbol,
+						entryPrice: order.entry_price,
+						condition: order.entry_condition,
+						reason: order.reason || '',
+					})
+					if (placed) {
+						console.log(`[Bot] ✅ Conditional order placed: ${order.symbol} ${order.action} @ ${order.entry_price}`)
+					}
+				}
+			}
+		} catch (err) {
+			console.error('[Bot] AI Conditional Orders error:', err.message)
+		}
+	}
+
 	await sendCycleSummary(results, RUN_NUMBER)
 
 	// Sync trade results
@@ -315,6 +409,7 @@ async function runAllCycles() {
 						setup: t.reason?.includes('momentum') ? 'momentum_sell' : t.reason?.includes('pullback') ? 'pullback_sell' : 'rules',
 						entryIndicators: t.indicators,
 						result: 'UNKNOWN', pnl: 0,
+						slPips: t.sl_pips, tpPips: t.tp_pips,
 					})
 				}
 			}

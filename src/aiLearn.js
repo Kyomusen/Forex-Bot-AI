@@ -157,11 +157,75 @@ Respond ONLY valid JSON (no markdown):
 		}
 	}
 
+	// Analyze SL/TP patterns and store insights
+	for (const [symbol, trades] of Object.entries(bySymbol)) {
+		const sltp = analyzeSLTP(trades)
+		if (sltp) {
+			if (!existing[symbol]) existing[symbol] = {}
+			existing[symbol].slTpInsights = sltp
+			changed = true
+			console.log(`[AI Learn] ${symbol} SL/TP: hitSL ${sltp.slHitRate}% | suggest SL:${sltp.slSuggestion} (${sltp.slMultiplier}x) TP:${sltp.tpSuggestion} (${sltp.tpMultiplier}x)`)
+		}
+	}
+
 	if (changed) {
 		saveLearnedRules(existing)
 		console.log(`[AI Learn] Saved ${Object.keys(existing).length} AI learned rules`)
 	}
 	return existing
+}
+
+function analyzeSLTP(trades) {
+	const withExit = trades.filter(t => t.exitReason && t.slPips && t.tpPips)
+	if (withExit.length < 5) return null
+
+	const hitSL = withExit.filter(t => t.exitReason === 'SL')
+	const hitTP = withExit.filter(t => t.exitReason === 'TP')
+	const slRate = hitSL.length / withExit.length
+
+	const winByExit = {}
+	const lossByExit = {}
+	for (const t of withExit) {
+		const key = t.exitReason || 'UNKNOWN'
+		if (t.result === 'WIN') winByExit[key] = (winByExit[key] || 0) + 1
+		if (t.result === 'LOSS') lossByExit[key] = (lossByExit[key] || 0) + 1
+	}
+
+	const avgSlPips = withExit.reduce((s, t) => s + (t.slPips || 0), 0) / withExit.length
+	const avgTpPips = withExit.reduce((s, t) => s + (t.tpPips || 0), 0) / withExit.length
+
+	// If > 60% of trades hit SL first, SL might be too tight
+	let slSuggestion = 'normal'
+	if (slRate > 0.65) slSuggestion = 'wide'
+	else if (slRate < 0.35) slSuggestion = 'tight'
+
+	// For trades that won, check if TP was far from entry (suggest tighter)
+	const winTrades = withExit.filter(t => t.result === 'WIN')
+	const lossTrades = withExit.filter(t => t.result === 'LOSS')
+
+	let tpSuggestion = 'normal'
+	if (winTrades.length >= 3) {
+		const avgWinPips = winTrades.reduce((s, t) => s + Math.abs((t.pnl || 0) / (t.slPips || 1) * (t.slPips || 1)), 0) / winTrades.length
+		const avgPipMove = winTrades.reduce((s, t) => s + Math.abs((t.pnl || 0) / 10), 0) / winTrades.length
+		if (avgPipMove > 0 && avgTpPips > 0 && avgPipMove < avgTpPips * 0.4) {
+			tpSuggestion = 'tight'
+		}
+	}
+
+	const slMultiplier = slSuggestion === 'wide' ? 1.3 : slSuggestion === 'tight' ? 0.7 : 1.0
+	const tpMultiplier = tpSuggestion === 'wide' ? 1.3 : tpSuggestion === 'tight' ? 0.7 : 1.0
+
+	return {
+		analyzed: withExit.length,
+		slHitRate: parseFloat((slRate * 100).toFixed(0)),
+		tpHitRate: parseFloat(((1 - slRate) * 100).toFixed(0)),
+		avgSlPips: Math.round(avgSlPips),
+		avgTpPips: Math.round(avgTpPips),
+		slSuggestion,
+		tpSuggestion,
+		slMultiplier,
+		tpMultiplier,
+	}
 }
 
 export function getLearnedRulesForPrompt(symbol) {
@@ -171,7 +235,19 @@ export function getLearnedRulesForPrompt(symbol) {
 	return entry
 }
 
-export { loadLearnedRules, saveLearnedRules }
+export function getSLTPAdjustment(symbol, trades = null) {
+	const rules = loadLearnedRules()
+	const entry = rules[symbol]
+	if (entry?.slTpInsights) {
+		return {
+			slMultiplier: entry.slTpInsights.slMultiplier ?? 1.0,
+			tpMultiplier: entry.slTpInsights.tpMultiplier ?? 1.0,
+		}
+	}
+	return { slMultiplier: 1.0, tpMultiplier: 1.0 }
+}
+
+export { loadLearnedRules, saveLearnedRules, analyzeSLTP }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
 	console.log(`[AI Learn] Standalone mode — loading ${loadTrades().length} trades...`)

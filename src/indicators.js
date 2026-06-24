@@ -41,6 +41,39 @@ function calcATR(highs, lows, closes, period = 14) {
 	return result[result.length - 1] ?? null
 }
 
+function calcSupportResistance(candles, lookback = 24) {
+	const recent = candles.slice(-Math.min(lookback, candles.length - 1))
+	if (recent.length < 10) return { swingHigh: null, swingLow: null, nearSupport: false, nearResistance: false }
+
+	const { high, low, close } = extractOHLC(candles)
+	const currentPrice = close[close.length - 1]
+	const highs = recent.map(c => c.highPrice.bid)
+	const lows = recent.map(c => c.lowPrice.bid)
+
+	const swingHigh = Math.max(...highs)
+	const swingLow = Math.min(...lows)
+	const ema50 = calcEMA(close, 50)
+	const atrVal = calcATR(high, low, close)
+
+	if (!atrVal || atrVal <= 0) return { swingHigh, swingLow, nearSupport: false, nearResistance: false }
+
+	const srAtr = parseFloat(process.env.BACKTEST_SR_ATR) || 0.3
+	const threshold = atrVal * srAtr
+
+	const nearSwingSupport = Math.abs(currentPrice - swingLow) <= threshold
+	const nearSwingResistance = Math.abs(currentPrice - swingHigh) <= threshold
+
+	const nearEma = ema50 ? Math.abs(currentPrice - ema50) <= threshold * 2 : false
+
+	const aboveEma50 = currentPrice && ema50 ? currentPrice > ema50 : false
+	const belowEma50 = currentPrice && ema50 ? currentPrice < ema50 : false
+
+	const nearSupport = nearSwingSupport || (nearEma && aboveEma50)
+	const nearResistance = nearSwingResistance || (nearEma && belowEma50)
+
+	return { swingHigh, swingLow, nearSupport, nearResistance }
+}
+
 function getIndicators(candles) {
 	const { high, low, close } = extractOHLC(candles)
 
@@ -49,6 +82,7 @@ function getIndicators(candles) {
 	const ema50 = calcEMA(close, 50)
 	const macd = calcMACD(close)
 	const atr = calcATR(high, low, close)
+	const sr = calcSupportResistance(candles, 24)
 
 	const currentPrice = close[close.length - 1]
 
@@ -65,6 +99,7 @@ function getIndicators(candles) {
 			histogramTrend: macd?.histogram > 0 ? 'positive' : 'negative',
 		},
 		atr,
+		...sr,
 	}
 }
 

@@ -13,17 +13,22 @@ export const SYMBOL_STRATEGY = {
 		minTp: 25,
 	},
 	XAUUSD: {
-		allowedSetups: ['momentum_sell'],
+		allowedSetups: ['trend_buy', 'trend_sell'],
 		rsi: {
+			trend_buy: { min: 30, max: 50 },
+			trend_sell: { min: 50, max: 70 },
 			momentum_sell: { min: 28, max: 48 },
+			momentum_buy: { min: 48, max: 62 },
+			pullback_sell: { min: 55, max: 75 },
+			pullback_buy: { min: 30, max: 50 },
 		},
 		trendRequired: false,
 		requireH1Trend: false,
 		requireBelowEma50: false,
-		atrSlM: 0.8,
-		atrTpM: 2.5,
-		minSl: 15,
-		minTp: 35,
+		atrSlM: 1.0,
+		atrTpM: 2.0,
+		minSl: 10,
+		minTp: 25,
 	},
 	GBPUSD: {
 		allowedSetups: ['momentum_sell'],
@@ -88,7 +93,7 @@ export function atrParams(atr, symbol) {
 
 export function evaluate(params) {
 	const { symbol, h4Trend, ind, knowledge } = params
-	const { rsi, ema20, ema50, emaTrend: h1Trend, macd, atr, currentPrice } = ind
+	const { rsi, ema20, ema50, emaTrend: h1Trend, macd, atr, currentPrice, nearSupport, nearResistance } = ind
 	if (rsi == null || !atr) return null
 
 	const cfg = SYMBOL_STRATEGY[symbol]
@@ -103,6 +108,9 @@ export function evaluate(params) {
 	const macdPositive = macd?.histogramTrend === 'positive'
 	const macdCrossoverBear = macd?.histogram < 0 && macd?.macd < macd?.signal
 	const macdCrossoverBull = macd?.histogram > 0 && macd?.macd > macd?.signal
+	const noMacdFilter = process.env.BACKTEST_NO_MACD_FILTER === 'true'
+	const noRsiFilter = process.env.BACKTEST_NO_RSI_FILTER === 'true'
+	const noEmaFilter = process.env.BACKTEST_NO_EMA_FILTER === 'true'
 
 	const downtrend = cfg.trendRequired
 		? h4Trend === 'bearish' && belowEma50 && h1Trend === 'bearish'
@@ -118,6 +126,12 @@ export function evaluate(params) {
 		const rsiRange = cfg.rsi[setup]
 		if (!rsiRange) continue
 
+		if (setup === 'trend_sell' && downtrend && (noMacdFilter || macdNegative) && nearResistance && (noEmaFilter || aboveEma20) && (noRsiFilter || (rsi >= rsiRange.min && rsi <= rsiRange.max))) {
+			candidates.push({ action: 'SELL', setup, confidence: 0.8, slPips, tpPips })
+		}
+		if (setup === 'trend_buy' && uptrend && (noMacdFilter || macdPositive) && nearSupport && (noEmaFilter || belowEma20) && (noRsiFilter || (rsi >= rsiRange.min && rsi <= rsiRange.max))) {
+			candidates.push({ action: 'BUY', setup, confidence: 0.8, slPips, tpPips })
+		}
 		if (setup === 'momentum_sell' && downtrend && macdNegative) {
 			let sellOk = rsi >= rsiRange.min && rsi <= rsiRange.max && macdCrossoverBear && belowEma20
 			if (cfg.requireH1Trend && h1Trend !== 'bearish') sellOk = false
@@ -135,16 +149,15 @@ export function evaluate(params) {
 			}
 		}
 		if (setup === 'momentum_buy' && uptrend && macdPositive) {
-			let buyOk = rsi >= rsiRange.min && rsi <= rsiRange.max && aboveEma20
+			let buyOk = rsi >= rsiRange.min && rsi <= rsiRange.max && macdCrossoverBull && aboveEma20
 			if (cfg.requireH1Trend && h1Trend !== 'bullish') buyOk = false
 			if (cfg.requireBelowEma50 && !aboveEma50) buyOk = false
-			if (symbol === 'US30') buyOk = buyOk && macdCrossoverBull && h1Trend === 'bullish'
 			if (buyOk) {
 				candidates.push({ action: 'BUY', setup, confidence: 0.7, slPips, tpPips })
 			}
 		}
 		if (setup === 'pullback_buy' && uptrend && macdPositive) {
-			let buyOk = rsi >= rsiRange.min && rsi <= rsiRange.max && belowEma20
+			let buyOk = rsi >= rsiRange.min && rsi <= rsiRange.max && macdCrossoverBull && belowEma20
 			if (cfg.requireH1Trend && h1Trend !== 'bullish') buyOk = false
 			if (cfg.requireBelowEma50 && !aboveEma50) buyOk = false
 			if (buyOk) {

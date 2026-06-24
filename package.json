@@ -11,6 +11,7 @@
 		"axios": "^1.7.0",
 		"dotenv": "^16.0.0",
 		"node-cron": "^4.0.0",
-		"technicalindicators": "^3.1.0"
+		"technicalindicators": "^3.1.0",
+		"tweetsodium": "^0.0.4"
 	}
 }

@@ -2,6 +2,9 @@ import {
 	openPosition,
 	closePosition,
 	getOpenPositions,
+	createWorkingOrder,
+	getWorkingOrders,
+	cancelWorkingOrder as capitalCancelWorkingOrder,
 	toEpic,
 } from './capitalClient.js'
 
@@ -74,9 +77,67 @@ async function logOpenPositions() {
 	}
 }
 
+async function placeWorkingOrder(params) {
+	try {
+		console.log('[Order] วาง Working Order:', params)
+		const result = await createWorkingOrder(params)
+		console.log('[Order] วาง Working Order สำเร็จ:', result)
+		return result
+	} catch (err) {
+		console.error('[Order] วาง Working Order ล้มเหลว:', JSON.stringify(err.response?.data ?? err.message))
+		return null
+	}
+}
+
+async function listWorkingOrders() {
+	try {
+		return await getWorkingOrders()
+	} catch (err) {
+		console.error('[Order] ดึง Working Orders ล้มเหลว:', err.response?.data ?? err.message)
+		return []
+	}
+}
+
+async function cancelWorkingOrder(dealId) {
+	try {
+		console.log('[Order] ยกเลิก Working Order:', dealId)
+		const result = await capitalCancelWorkingOrder(dealId)
+		console.log('[Order] ยกเลิก Working Order สำเร็จ')
+		return result
+	} catch (err) {
+		console.error('[Order] ยกเลิก Working Order ล้มเหลว:', err.response?.data ?? err.message)
+		return null
+	}
+}
+
+async function cancelAllWorkingOrders(symbol) {
+	try {
+		const orders = await getWorkingOrders()
+		const epic = symbol ? (epicMap[symbol] ?? symbol) : null
+		const toCancel = epic
+			? orders.filter(o => o.workingOrderData?.epic === epic)
+			: orders
+		for (const order of toCancel) {
+			await capitalCancelWorkingOrder(order.workingOrderData.dealId)
+		}
+		console.log(`[Order] ยกเลิก ${toCancel.length} Working Orders แล้ว`)
+		return toCancel.length
+	} catch (err) {
+		console.error('[Order] ยกเลิกทั้งหมดล้มเหลว:', err.message)
+		return 0
+	}
+}
+
+// Simple local epic map for cancelAllWorkingOrders
+const epicMap = { XAUUSD: 'GOLD' }
+
 export {
 	placeOrder,
 	closeAllPositions,
 	hasOpenPosition,
 	logOpenPositions,
+	placeWorkingOrder,
+	listWorkingOrders,
+	cancelWorkingOrder,
+	cancelAllWorkingOrders,
 }

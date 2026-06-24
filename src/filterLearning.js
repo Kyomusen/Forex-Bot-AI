@@ -14,7 +14,7 @@ function save(data) {
 	fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(data, null, 2))
 }
 
-export function recordTradeResult({ symbol, action, setup, entryIndicators, result, pnl, aiDecision }) {
+export function recordTradeResult({ symbol, action, setup, entryIndicators, result, pnl, aiDecision, slPips, tpPips, exitReason }) {
 	const data = load()
 	const ind = entryIndicators || {}
 	data.trades.push({
@@ -26,6 +26,9 @@ export function recordTradeResult({ symbol, action, setup, entryIndicators, resu
 		priceVsEma20: ind.currentPrice != null && ind.ema20 != null
 			? (ind.currentPrice > ind.ema20 ? 'above' : 'below') : 'unknown',
 		atr: ind.atr,
+		slPips: slPips ?? null,
+		tpPips: tpPips ?? null,
+		exitReason: exitReason ?? (result === 'WIN' ? 'TP' : result === 'LOSS' ? 'SL' : null),
 		result, pnl,
 		aiDecision: aiDecision || 'NONE',
 		closedAt: new Date().toISOString(),

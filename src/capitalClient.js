@@ -76,24 +76,45 @@ async function getCandles(symbol, resolution = 'MINUTE_15', max = 100) {
 	})
 	const prices = res.data.prices || []
 	if (!prices.length) return prices
-	let oldestTime = prices[prices.length - 1].snapshotTimeUTC || prices[prices.length - 1].snapshotTime
+
+	// Use a map to deduplicate candles by snapshotTimeUTC
+	const seen = new Map()
+	for (const c of prices) {
+		const key = c.snapshotTimeUTC || c.snapshotTime
+		if (!seen.has(key)) seen.set(key, c)
+	}
+
 	const totalNeeded = max
-	while (prices.length < totalNeeded) {
-		const remaining = totalNeeded - prices.length
-		const chunkSize = Math.min(CHUNK, remaining)
-		const to = new Date(oldestTime).getTime() - 60000
+	while (seen.size < totalNeeded) {
+		const oldestTime = [...seen.keys()].sort()[0] // earliest timestamp for paginating backwards
+		if (!oldestTime) break
+		// Parse as UTC by appending Z
+		const to = new Date(oldestTime.endsWith('Z') ? oldestTime : oldestTime + 'Z').getTime() - 1
 		const toStr = new Date(to).toISOString().replace(/\.\d+Z$/, '')
+		const remaining = totalNeeded - seen.size
+		const chunkSize = Math.min(CHUNK, remaining)
 		const res2 = await axios.get(`${BASE_URL}/prices/${epic}`, {
 			headers: getAuthHeaders(),
 			params: { resolution, max: chunkSize, to: toStr },
 		})
 		const chunk = res2.data.prices || []
 		if (!chunk.length) break
-		prices.push(...chunk)
-		if (chunk.length < chunkSize) break
-		oldestTime = chunk[chunk.length - 1].snapshotTimeUTC || chunk[chunk.length - 1].snapshotTime
+		let newCandles = 0
+		for (const c of chunk) {
+			const key = c.snapshotTimeUTC || c.snapshotTime
+			if (!seen.has(key)) {
+				seen.set(key, c)
+				newCandles++
+			}
+		}
+		if (newCandles === 0) break
 	}
-	return prices
+
+	return [...seen.values()].sort((a, b) => {
+		const ta = a.snapshotTimeUTC || a.snapshotTime
+		const tb = b.snapshotTimeUTC || b.snapshotTime
+		return ta.localeCompare(tb)
+	})
 }
 
 async function getOpenPositions() {
@@ -127,6 +148,41 @@ async function closePosition(dealId) {
 	return res.data
 }
 
+async function createWorkingOrder({ epic, direction, size, level, type, stopLevel, profitLevel, goodTillDate }) {
+	await ensureSession()
+	const body = {
+		epic: toEpic(epic),
+		direction,
+		size,
+		level,
+		type, // 'LIMIT' or 'STOP'
+		guaranteedStop: false,
+	}
+	if (stopLevel != null) body.stopLevel = stopLevel
+	if (profitLevel != null) body.profitLevel = profitLevel
+	if (goodTillDate) body.goodTillDate = goodTillDate
+	const res = await axios.post(`${BASE_URL}/workingorders`, body, {
+		headers: getAuthHeaders(),
+	})
+	return res.data
+}
+
+async function getWorkingOrders() {
+	await ensureSession()
+	const res = await axios.get(`${BASE_URL}/workingorders`, {
+		headers: getAuthHeaders(),
+	})
+	return res.data.workingOrders || []
+}
+
+async function cancelWorkingOrder(dealId) {
+	await ensureSession()
+	const res = await axios.delete(`${BASE_URL}/workingorders/${dealId}`, {
+		headers: getAuthHeaders(),
+	})
+	return res.data
+}
+
 async function getMarketInfo(symbol) {
 	await ensureSession()
 	const epic = toEpic(symbol)
@@ -143,6 +199,9 @@ export {
 	openPosition,
 	closePosition,
 	getMarketInfo,
+	createWorkingOrder,
+	getWorkingOrders,
+	cancelWorkingOrder,
 	SYMBOL_TO_EPIC,
 	toEpic,
 }

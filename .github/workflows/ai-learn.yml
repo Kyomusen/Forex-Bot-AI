@@ -30,7 +30,7 @@ jobs:
         run: |
           git config user.name "forex-bot"
           git config user.email "bot@forex.ai"
-          git add logs/ai_learned_rules.json 2>/dev/null || true
+          git add -f logs/ai_learned_rules.json logs/filter_knowledge.json logs/filter_wisdom.md 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else

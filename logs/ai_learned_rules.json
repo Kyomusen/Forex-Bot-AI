@@ -1,67 +1,100 @@
 {
   "GBPUSD": {
     "symbol": "GBPUSD",
-    "totalTrades": 84,
-    "winRate": 34.5,
+    "totalTrades": 107,
+    "winRate": 36.4,
     "skipRules": [
-      "SKIP when RSI is between 39.0 and 42.5 while EMA Trend is bullish",
-      "SKIP when RSI is between 28.0 and 34.0 while EMA Trend is bearish (oversold exhaustion)",
-      "SKIP when RSI is above 41.0 AND Price is above EMA20 (despite SELL signal)",
-      "SKIP when MACD negative but RSI is trending upwards from a 35+ level"
+      "SKIP SELL signal when EMA Trend is 'bullish' regardless of RSI level",
+      "SKIP SELL signal when RSI is 41.0 to 41.5 AND EMA Trend is 'bullish'",
+      "SKIP SELL signal when RSI is 28.5 to 29.6 AND the trade results in a drawdown deeper than -1.90",
+      "SKIP SELL signal when RSI is 34.0 to 35.0 AND EMA Trend is 'bullish'"
     ],
     "proceedRules": [
-      "PROCEED when RSI is below 30.0 and EMA Trend is bearish (strong momentum entry)",
-      "PROCEED when RSI is between 34.0 and 36.0 while Price is strictly below EMA20"
+      "PROCEED with SELL signal when RSI is 35.0 to 40.0 AND EMA Trend is 'bearish'",
+      "PROCEED with SELL signal when RSI is below 30.0 AND EMA Trend is 'bearish' (provided RSI is not in the 28.5-29.6 danger zone)"
     ],
     "corrections": [
-      "Only PROCEED with SELL trades when EMA Trend is bearish; disregard SELL signals during bullish EMA Trend regardless of RSI",
-      "Filter out SELL signals when RSI is in the 39-43 'mid-range' to avoid range-bound chop"
+      "Filter out all SELL signals occurring during bullish EMA Trend periods to improve win rate",
+      "Implement a RSI floor of 30.0 for SELL signals to avoid oversold-reversal losses"
     ],
-    "summary": "The strategy suffers from taking SELL trades during bullish EMA trends and failing to identify oversold exhaustion in the 28-34 RSI range.",
-    "learnedAt": "2026-06-23T07:12:16.998Z",
-    "tradesCount": 84
+    "summary": "The strategy suffers from taking SELL signals during bullish EMA trends; filtering these out significantly improves performance.",
+    "learnedAt": "2026-06-23T08:41:01.110Z",
+    "tradesCount": 107,
+    "slTpInsights": {
+      "analyzed": 107,
+      "slHitRate": 64,
+      "tpHitRate": 36,
+      "avgSlPips": 17,
+      "avgTpPips": 31,
+      "slSuggestion": "normal",
+      "tpSuggestion": "tight",
+      "slMultiplier": 1,
+      "tpMultiplier": 0.7
+    }
   },
   "USDJPY": {
     "symbol": "USDJPY",
-    "totalTrades": 59,
-    "winRate": 40.7,
+    "totalTrades": 97,
+    "winRate": 36.1,
     "skipRules": [
-      "SKIP when EMA Trend is 'bearish' and RSI is below 50.0",
-      "SKIP when RSI is between 48.0 and 49.5 regardless of AI signal",
-      "SKIP when AI signal is 'PROCEED' but RSI is less than 50.5",
-      "SKIP when EMA Trend is 'bearish' even if price is above EMA20"
+      "SKIP when EMA Trend is 'bullish' AND RSI is greater than 56.5",
+      "SKIP when EMA Trend is 'bearish' AND RSI is between 48.0 and 52.5 (excluding anomalies)",
+      "SKIP when RSI is between 59.5 and 60.0 regardless of other indicators"
     ],
     "proceedRules": [
-      "PROCEED only when EMA Trend is 'bullish' and RSI is above 52.0",
-      "PROCEED when EMA Trend is 'bullish' and RSI is between 55.0 and 60.0"
+      "PROCEED when EMA Trend is 'bullish' AND RSI is between 53.0 and 55.5",
+      "PROCEED when EMA Trend is 'bearish' AND RSI is near 48.0 (specifically 48.0-48.7 range)"
     ],
     "corrections": [
-      "Strictly filter out all 'bearish' EMA trend signals for USDJPY BUY trades, as they show a high correlation with large losses (PnL -3.0 or worse).",
-      "Implement a hard floor of RSI 50.0 for all BUY entries to avoid entering 'trap' signals where the momentum is actually weakening."
+      "Filter out long signals when RSI enters the 'overbought' territory above 56.5 in a bullish EMA trend, as this is currently generating high-frequency losses.",
+      "Abandon 'buy' signals when the EMA trend is bearish, as the win rate on these signals is statistically negligible compared to the loss magnitude."
     ],
-    "summary": "USDJPY performance is strongly correlated with bullish EMA alignment; trading against the bearish EMA trend is consistently resulting in high-loss outcomes.",
-    "learnedAt": "2026-06-23T07:12:19.980Z",
-    "tradesCount": 59
+    "summary": "Current strategy suffers from over-trading in 'bullish' EMA trends when RSI is elevated (56.5+), resulting in consistent losses.",
+    "learnedAt": "2026-06-23T08:40:57.840Z",
+    "tradesCount": 97,
+    "slTpInsights": {
+      "analyzed": 97,
+      "slHitRate": 64,
+      "tpHitRate": 36,
+      "avgSlPips": 15,
+      "avgTpPips": 26,
+      "slSuggestion": "normal",
+      "tpSuggestion": "tight",
+      "slMultiplier": 1,
+      "tpMultiplier": 0.7
+    }
   },
   "XAUUSD": {
     "symbol": "XAUUSD",
-    "totalTrades": 121,
-    "winRate": 43.8,
+    "totalTrades": 500,
+    "winRate": 31.2,
     "skipRules": [
-      "SKIP when RSI is between 28 and 31, as high volatility in extreme oversold zones frequently triggers stop-losses.",
-      "SKIP when EMA Trend is bullish even if price is below EMA20, to avoid counter-trend trap setups.",
-      "SKIP when RSI is greater than 43 and MACD is negative if the EMA trend is bullish."
+      "SKIP all SELL signals when RSI is between 50 and 55 AND MACD is positive",
+      "SKIP all BUY signals when EMA trend is bearish regardless of price position",
+      "SKIP all signals where Price is below EMA20 AND MACD is negative",
+      "SKIP all BUY signals when RSI is above 50 and Price is above EMA20"
     ],
     "proceedRules": [
-      "PROCEED when RSI is between 34 and 38 AND EMA Trend is bearish, as this confirms momentum alignment.",
-      "PROCEED when RSI is below 30 only if MACD histogram is widening downwards (momentum acceleration)."
+      "PROCEED with BUY signals only when EMA trend is bullish AND RSI is below 45",
+      "PROCEED with SELL signals only when EMA trend is bearish AND RSI is above 65"
     ],
     "corrections": [
-      "Require strict confluence: Only PROCEED when RSI is < 40 AND EMA Trend is bearish, filtering out bullish EMA trend noise.",
-      "Mandate a secondary filter: SKIP all SELL signals where RSI is between 43 and 48 regardless of EMA position, as this represents a consolidation zone."
+      "Filter out all PROCEED signals where RSI is in the 45-53 range, as these contribute significantly to the 30.6% error rate",
+      "Require MACD to be in the direction of the EMA trend before allowing any PROCEED decision"
     ],
-    "summary": "The strategy suffers from over-trading in ranging conditions; filtering for strict bearish EMA alignment and avoiding the 43-48 RSI 'neutral zone' significantly improves performance.",
-    "learnedAt": "2026-06-23T07:12:23.437Z",
-    "tradesCount": 121
+    "summary": "The strategy suffers from low-conviction entries during range-bound RSI (45-55) and counter-trend EMA setups; restricting entries to trend-aligned extreme RSI levels will significantly improve performance.",
+    "learnedAt": "2026-06-24T01:19:19.785Z",
+    "tradesCount": 500,
+    "slTpInsights": {
+      "analyzed": 500,
+      "slHitRate": 69,
+      "tpHitRate": 31,
+      "avgSlPips": 2449,
+      "avgTpPips": 6435,
+      "slSuggestion": "wide",
+      "tpSuggestion": "tight",
+      "slMultiplier": 1.3,
+      "tpMultiplier": 0.7
+    }
   }
 }

@@ -112,13 +112,18 @@ export function evaluate(params) {
 	const noRsiFilter = process.env.BACKTEST_NO_RSI_FILTER === 'true'
 	const noEmaFilter = process.env.BACKTEST_NO_EMA_FILTER === 'true'
 
+	const trendMode = process.env.BACKTEST_TREND_MODE || 'OR'
 	const downtrend = cfg.trendRequired
 		? h4Trend === 'bearish' && belowEma50 && h1Trend === 'bearish'
-		: (h4Trend === 'bearish' && belowEma50)
+		: trendMode === 'AND'
+			? (h4Trend === 'bearish' && belowEma50)
+			: (h4Trend === 'bearish' || belowEma50)
 
 	const uptrend = cfg.trendRequired
 		? h4Trend === 'bullish' && aboveEma50 && h1Trend === 'bullish'
-		: (h4Trend === 'bullish' && aboveEma50)
+		: trendMode === 'AND'
+			? (h4Trend === 'bullish' && aboveEma50)
+			: (h4Trend === 'bullish' || aboveEma50)
 
 	const candidates = []
 

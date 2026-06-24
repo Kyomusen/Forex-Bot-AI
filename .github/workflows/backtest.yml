@@ -35,6 +35,42 @@ on:
         description: 'Allowed setups (comma-separated)'
         required: true
         default: 'trend_buy,trend_sell'
+      trend_mode:
+        description: 'Trend filter: AND or OR'
+        required: true
+        default: 'OR'
+      sr_atr:
+        description: 'S/R proximity ATR multiplier'
+        required: true
+        default: '0.3'
+      trailing:
+        description: 'Enable trailing stop (true/false)'
+        required: true
+        default: 'true'
+      trailing_activate:
+        description: 'ATR profit to activate trailing'
+        required: true
+        default: '1.0'
+      trailing_distance:
+        description: 'ATR distance for trailing SL'
+        required: true
+        default: '0.5'
+      atr_sl:
+        description: 'ATR SL multiplier'
+        required: true
+        default: '1.0'
+      atr_tp:
+        description: 'ATR TP multiplier'
+        required: true
+        default: '4.0'
+      risk:
+        description: 'Risk percent per trade'
+        required: true
+        default: '1'
+      spread:
+        description: 'Spread pips'
+        required: true
+        default: '0.4'
 
 jobs:
   backtest:
@@ -83,10 +119,15 @@ jobs:
           BACKTEST_ATR_TP: '4.0'
           BACKTEST_RISK: '1'
           BACKTEST_SPREAD_PIPS: '0.4'
-          BACKTEST_SR_ATR: '0.2'
-          BACKTEST_TRAILING: 'true'
-          BACKTEST_TRAILING_ACTIVATE: '1.0'
-          BACKTEST_TRAILING_DISTANCE: '0.5'
+          BACKTEST_TREND_MODE: ${{ github.event.inputs.trend_mode }}
+          BACKTEST_SR_ATR: ${{ github.event.inputs.sr_atr }}
+          BACKTEST_TRAILING: ${{ github.event.inputs.trailing }}
+          BACKTEST_TRAILING_ACTIVATE: ${{ github.event.inputs.trailing_activate }}
+          BACKTEST_TRAILING_DISTANCE: ${{ github.event.inputs.trailing_distance }}
+          BACKTEST_ATR_SL: ${{ github.event.inputs.atr_sl }}
+          BACKTEST_ATR_TP: ${{ github.event.inputs.atr_tp }}
+          BACKTEST_RISK: ${{ github.event.inputs.risk }}
+          BACKTEST_SPREAD_PIPS: ${{ github.event.inputs.spread }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FALLBACK_GEMINI_API_KEY: ${{ secrets.FALLBACK_GEMINI_API_KEY }}
           FALLBACK_GEMINI_API_KEY_2: ${{ secrets.FALLBACK_GEMINI_API_KEY_2 }}

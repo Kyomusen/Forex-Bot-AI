@@ -1,4 +1,4 @@
-name: Backtest + AI Learn
+name: Backtest
 
 on:
   workflow_dispatch:
@@ -15,26 +15,10 @@ on:
         description: 'Candle offset from latest'
         required: true
         default: '0'
-      use_ai:
-        description: 'Use AI filter (true/false)'
-        required: true
-        default: 'false'
-      random_signals:
-        description: 'Random signals per symbol for AI (0 = all)'
-        required: true
-        default: '0'
       segments:
         description: 'Walk-forward segments'
         required: true
         default: '1'
-      learn:
-        description: 'Run AI learn after backtest (true/false)'
-        required: true
-        default: 'true'
-      ai_skip_rate:
-        description: 'AI skip analysis rate (0=disabled, 1.0=100%)'
-        required: true
-        default: '1.0'
       setups:
         description: 'Allowed setups (comma-separated)'
         required: true
@@ -105,16 +89,12 @@ jobs:
         run: npm ci
 
       - name: Run backtest
-        run: node src/backtest.js
+        run: node src/core/backtest.js
         env:
           BACKTEST_SYMBOLS: ${{ github.event.inputs.symbols }}
           BACKTEST_CANDLES: ${{ github.event.inputs.candles }}
           BACKTEST_OFFSET: ${{ github.event.inputs.offset }}
-          BACKTEST_USE_AI: ${{ github.event.inputs.use_ai }}
-          BACKTEST_RANDOM_SIGNALS: ${{ github.event.inputs.random_signals }}
           BACKTEST_SEGMENTS: ${{ github.event.inputs.segments }}
-          BACKTEST_LEARN: ${{ github.event.inputs.learn }}
-          BACKTEST_AI_SKIP_RATE: ${{ github.event.inputs.ai_skip_rate }}
           BACKTEST_TF: 'HOUR'
           BACKTEST_SETUPS: ${{ github.event.inputs.setups }}
           BACKTEST_NO_MACD_FILTER: 'true'
@@ -129,25 +109,10 @@ jobs:
           BACKTEST_ATR_TP: ${{ github.event.inputs.atr_tp }}
           BACKTEST_RISK: ${{ github.event.inputs.risk }}
           BACKTEST_SPREAD_PIPS: ${{ github.event.inputs.spread }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FALLBACK_GEMINI_API_KEY: ${{ secrets.FALLBACK_GEMINI_API_KEY }}
-          FALLBACK_GEMINI_API_KEY_2: ${{ secrets.FALLBACK_GEMINI_API_KEY_2 }}
           CAPITAL_EMAIL: ${{ secrets.CAPITAL_EMAIL }}
           CAPITAL_PASSWORD: ${{ secrets.CAPITAL_PASSWORD }}
           CAPITAL_API_KEY: ${{ secrets.CAPITAL_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-
-      - name: Commit updated knowledge
-        run: |
-          git config user.name "forex-bot"
-          git config user.email "bot@forex.ai"
-          git add -f logs/filter_knowledge.json logs/filter_wisdom.md logs/ai_learned_rules.json logs/logic_learned_rules.json 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No knowledge changes to commit"
-          else
-            git commit -m "chore: update backtest knowledge (BT: ${{ github.event.inputs.symbols }}/${{ github.event.inputs.candles }}c/${{ github.event.inputs.offset }}o/${{ github.event.inputs.use_ai }}ai) [skip ci]"
-            git push
-          fi
 
       - name: Upload logs artifact
         if: always()

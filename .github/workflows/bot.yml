@@ -36,15 +36,12 @@ jobs:
           restore-keys: |
             pending-
 
-      - name: Restore knowledge & trade history
+      - name: Restore trade history
         uses: actions/cache@v4
         id: knowledge-cache
         with:
           path: |
             logs/trade_history.json
-            logs/filter_knowledge.json
-            logs/filter_wisdom.md
-            logs/ai_learned_rules.json
             logs/api_usage.json
           key: knowledge-${{ github.run_id }}
           restore-keys: |
@@ -57,7 +54,7 @@ jobs:
         run: npm ci
 
       - name: Run bot (one cycle)
-        run: node src/bot.js
+        run: node src/core/bot.js
         env:
           SINGLE_RUN: 'true'
           CAPITAL_EMAIL: ${{ secrets.CAPITAL_EMAIL }}

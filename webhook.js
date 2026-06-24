@@ -28,7 +28,7 @@ async function runBot() {
 		const out = fs.openSync(logFile, 'a')
 		const err = fs.openSync(logFile, 'a')
 
-		const child = spawn('node', ['src/bot.js'], {
+		const child = spawn('node', ['src/core/bot.js'], {
 			env: { ...process.env, SINGLE_RUN: 'true' },
 			stdio: ['ignore', out, err],
 			cwd: process.cwd(),

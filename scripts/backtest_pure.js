@@ -1,6 +1,7 @@
 import { RSI, EMA, MACD, ATR } from 'technicalindicators'
 import dotenv from 'dotenv'
 import fs from 'fs'
+import { createSession, getCandles } from '../src/core/capitalClient.js'
 
 dotenv.config()
 
@@ -307,7 +308,6 @@ async function loadCandles(symbol, tf, count, cache, label) {
 		return cache[key].slice(-(count + off), off === 0 ? undefined : -off)
 	}
 	console.log(`[Fetch] ${symbol} ${tf} (${label}): loading ${count} candles...`)
-	const { createSession, getCandles } = await import('./capitalClient.js')
 	const raw = await getCandles(symbol, tf, count)
 	if (raw && raw.length > 0) {
 		cache[key] = raw
@@ -335,6 +335,7 @@ async function runBacktest() {
 	console.log(`\n[Backtest] ===== Pure Strategy =====`)
 	console.log(`[Backtest] ${SYMBOLS.join(', ')} | ${TF}+${TREND_TF} | ${CANDLE_COUNT}c | ${TREND_MODE} | SR=${SR_ATR} | trail=${TRAILING} a=${TRAILING_ACTIVATE} d=${TRAILING_DISTANCE} | SL=${ATR_SL} TP=${ATR_TP} | risk=${RISK_PERCENT}%`)
 
+	await createSession()
 	const cache = loadCandleCache()
 	const allData = {}
 	let minLen = Infinity

@@ -26,7 +26,7 @@ export const SYMBOL_STRATEGY = {
 		requireH1Trend: false,
 		requireBelowEma50: false,
 		atrSlM: 1.0,
-		atrTpM: 2.0,
+		atrTpM: 5.0,
 		minSl: 10,
 		minTp: 25,
 	},

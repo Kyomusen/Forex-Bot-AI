@@ -62,7 +62,7 @@ on:
       atr_tp:
         description: 'ATR TP multiplier'
         required: true
-        default: '4.0'
+        default: '5.0'
       risk:
         description: 'Risk percent per trade'
         required: true

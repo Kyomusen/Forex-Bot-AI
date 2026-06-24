@@ -2,18 +2,14 @@ import cron from 'node-cron'
 import dotenv from 'dotenv'
 import { createSession, getCandles, getOpenPositions, updatePosition, toEpic } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
-import { getAIFilter, getAIConditionalOrders } from './aiDecision.js'
 import { checkNews } from './newsFilter.js'
 import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition } from './orderManager.js'
-import { renderChart } from './chartRenderer.js'
-import { addTrade, getLearningHistory, loadHistory, saveHistory } from './tradeHistory.js'
+import { addTrade, loadHistory } from './tradeHistory.js'
 import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from './discordNotifier.js'
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
-import { loadKnowledge, updateKnowledge, syncTradeResults } from './selfLearning.js'
 import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
 import { loadPending, savePending, placePendingOrder, syncWithCapital, cleanExpired, executePendingOrders } from './pendingOrders.js'
-import { recordTradeResult } from './filterLearning.js'
 
 dotenv.config()
 
@@ -291,26 +287,7 @@ async function runAllCycles() {
 			continue
 		}
 
-		// Step 2: AI filter (PROCEED/SKIP + SL/TP adjustment)
-		const aiResult = await getAIFilter({
-			symbol, indicatorDecision, marketData: mainInd,
-			slPips: baseSlPips, tpPips: baseTpPips,
-		})
-		if (aiResult.action === 'SKIP') {
-			console.log(`[Bot] ${symbol} AI filter: SKIP — ${aiResult.reason}`)
-			results.push({ symbol, action, status: 'SKIP', reason: `AI skip: ${(aiResult.reason || '').slice(0, 200)}` })
-			continue
-		}
-		console.log(`[Bot] ${symbol} AI filter: PROCEED (conf ${(aiResult.confidence * 100).toFixed(0)}%)`)
-
-		// Apply AI SL/TP adjustments
-		const slPips = Math.max(5, Math.round(baseSlPips * (aiResult.slMultiplier ?? 1.0)))
-		const tpPips = Math.max(10, Math.round(baseTpPips * (aiResult.tpMultiplier ?? 1.0)))
-		const slAdjLabel = (aiResult.slMultiplier ?? 1.0) < 0.85 ? 'tight' : (aiResult.slMultiplier ?? 1.0) > 1.15 ? 'wide' : 'normal'
-		const tpAdjLabel = (aiResult.tpMultiplier ?? 1.0) < 0.85 ? 'tight' : (aiResult.tpMultiplier ?? 1.0) > 1.15 ? 'wide' : 'normal'
-		console.log(`[Bot] ${symbol} AI SL:${slAdjLabel} (${baseSlPips}→${slPips}pips) TP:${tpAdjLabel} (${baseTpPips}→${tpPips}pips)`)
-
-		// Step 3: News filter
+		// Step 2: News filter
 		const newsResult = await checkNews(symbol)
 		if (newsResult.hasMajorEvent) {
 			console.log(`[Bot] ${symbol} news: BLOCK — ${(newsResult.events || []).join(', ')}`)
@@ -318,7 +295,10 @@ async function runAllCycles() {
 			continue
 		}
 
-		// Step 4: Place order
+		const slPips = baseSlPips
+		const tpPips = baseTpPips
+
+		// Step 3: Place order
 		const currentPrice = mainInd.currentPrice
 		const orderParams = await buildOrderParams({
 			decision: { action, sl_pips: slPips, tp_pips: tpPips, confidence },
@@ -346,7 +326,7 @@ async function runAllCycles() {
 				symbol,
 				action,
 				confidence,
-				reason: `Indicator: ${setup} | AI: ${(aiResult.reason || '').slice(0, 100)}`,
+				reason: `Indicator: ${setup}`,
 				entry: currentPrice,
 				sl_pips: slPips,
 				tp_pips: tpPips,
@@ -361,7 +341,7 @@ async function runAllCycles() {
 				sl: orderParams.stopLevel,
 				tp: orderParams.profitLevel,
 				confidence,
-				reason: `Indicator: ${setup} | AI: ${(aiResult.reason || '').slice(0, 100)}`,
+				reason: `Indicator: ${setup}`,
 				trend_alignment: 'aligned',
 				paper: PAPER_TRADING,
 			})
@@ -369,100 +349,7 @@ async function runAllCycles() {
 		}
 	}
 
-	// Phase 4: AI Conditional Orders (for symbols without immediate trades)
-	const tradedSymbols = new Set(results.filter(r => r.status === 'OK').map(r => r.symbol))
-	const conditionalSymbols = SYMBOLS.filter(s => !tradedSymbols.has(s))
-	if (conditionalSymbols.length > 0 && !PAPER_TRADING) {
-		console.log('[Bot] Phase 3: AI Conditional Orders...')
-		try {
-			// Build allData from cached candle data collected during Phase 2
-			const allData = []
-			for (const symbol of conditionalSymbols) {
-				const candleMap = {}
-				let valid = true
-				for (const { tf, label } of TIMEFRAMES) {
-					const candles = getCached({ symbol, tf, candles: [] })
-					if (!candles || candles.length < 60) { valid = false; break }
-					candleMap[label] = candles
-				}
-				if (!valid) continue
-				const multiTFIndicators = getMultiTFIndicators(candleMap)
-				const mainInd = Object.values(multiTFIndicators)[0]
-				if (!mainInd || !mainInd.rsi || !mainInd.atr) continue
-				// Render chart for AI
-				const charts = {}
-				for (const { tf, label } of TIMEFRAMES) {
-					try {
-						const buf = await renderChart(candleMap[label], label)
-						if (buf) charts[label] = buf
-					} catch {}
-				}
-				allData.push({ symbol, indicators: multiTFIndicators, charts })
-			}
-
-			if (allData.length > 0) {
-				const learningHistory = getLearningHistory()
-				const knowledgeMd = loadKnowledge()
-				const conditionalOrders = await getAIConditionalOrders(allData, learningHistory, knowledgeMd)
-				for (const order of conditionalOrders || []) {
-					const indicators = allData.find(d => d.symbol === order.symbol)?.indicators
-					const mainInd = indicators ? Object.values(indicators)[0] : null
-					if (!mainInd) continue
-					if (await hasOpenPosition(order.symbol)) continue
-					// Check no duplicate pending order
-					const existing = loadPending().filter(p => p.symbol === order.symbol)
-					if (existing.length >= 2) continue
-					const placed = await placePendingOrder({
-						decision: {
-							action: order.action,
-							sl_pips: order.sl_pips,
-							tp_pips: order.tp_pips,
-							confidence: order.confidence || 0.7,
-						},
-						indicators: { currentPrice: mainInd.currentPrice },
-						accountBalance: ACCOUNT_BALANCE,
-						symbol: order.symbol,
-						entryPrice: order.entry_price,
-						condition: order.entry_condition,
-						reason: order.reason || '',
-					})
-					if (placed) {
-						console.log(`[Bot] ✅ Conditional order placed: ${order.symbol} ${order.action} @ ${order.entry_price}`)
-					}
-				}
-			}
-		} catch (err) {
-			console.error('[Bot] AI Conditional Orders error:', err.message)
-		}
-	}
-
 	await sendCycleSummary(results, RUN_NUMBER)
-
-	// Sync trade results
-	try {
-		const positions = await getOpenPositions()
-		const openDealIds = new Set((positions ?? []).map(p => p.position?.dealId).filter(Boolean))
-		const hist = loadHistory()
-		if (syncTradeResults(hist, openDealIds)) {
-			saveHistory(hist)
-			console.log('[Learn] อัปเดตผลเทรดที่ปิดแล้ว')
-			// Record closed trades for filter learning
-			for (const t of hist) {
-				if (t.result === 'CLOSED' && t.indicators) {
-					recordTradeResult({
-						symbol: t.symbol, action: t.action,
-						setup: t.reason?.includes('momentum') ? 'momentum_sell' : t.reason?.includes('pullback') ? 'pullback_sell' : 'rules',
-						entryIndicators: t.indicators,
-						result: 'UNKNOWN', pnl: 0,
-						slPips: t.sl_pips, tpPips: t.tp_pips,
-					})
-				}
-			}
-		}
-		updateKnowledge(hist)
-	} catch (err) {
-		console.error('[Learn] error:', err.message)
-	}
 }
 
 async function start() {

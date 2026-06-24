@@ -3,8 +3,10 @@ import { getGeminiModel } from './geminiClient.js'
 import { querySimilarTrades } from './filterLearning.js'
 import { getWisdomForPrompt } from './filterWisdom.js'
 import { getLearnedRulesForPrompt } from './aiLearn.js'
+import { querySimilar, getSkillSummary, recordPrediction } from './aiSkipSkill.js'
 
 const model = getGeminiModel()
+const _predictionCache = new Map()
 
 const RATE_LIMIT_MAX = 13
 const RATE_LIMIT_WINDOW = 60000
@@ -277,7 +279,7 @@ async function getAIConditionalOrders(allData, learningHistory, knowledgeMd) {
 	}
 }
 
-function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patterns, wisdom, slPips, tpPips }) {
+function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patterns, wisdom, slPips, tpPips, logicRules }) {
 	const { rsi, ema20, ema50, emaTrend, macd, atr, currentPrice } = marketData || {}
 	const macdHist = macd?.histogram ?? 0
 	const macdHistTrend = macd?.histogramTrend ?? 'neutral'
@@ -285,11 +287,11 @@ function buildFilterPrompt({ symbol, action, setup, confidence, marketData, patt
 
 	let learningSection = ''
 	if (patterns) {
-		const riskLabel = patterns.winRate < 0.3 ? '🔴 HIGH RISK' : patterns.winRate < 0.4 ? '🟡 CAUTION' : '🟢 NORMAL'
-		learningSection = `\n📊 Past ${patterns.total} similar trades on ${symbol} (${setup}):
+		const riskLabel = patterns.winRate < 0.3 ? 'HIGH RISK' : patterns.winRate < 0.4 ? 'CAUTION' : 'NORMAL'
+		learningSection = `\nPast ${patterns.total} similar trades on ${symbol} (${setup}):
 Wins: ${patterns.wins} | Losses: ${patterns.losses} | Win Rate: ${(patterns.winRate * 100).toFixed(0)}% | ${riskLabel}
-${patterns.winRate < 0.3 ? '⚠️ Past similar trades had LOW win rate — STRONGLY consider SKIP' : ''}
-${patterns.winRate < 0.4 ? '⚠️ Past similar trades were below average — use extra caution' : ''}`
+${patterns.winRate < 0.3 ? 'WARNING: Past similar trades had LOW win rate — STRONGLY consider SKIP' : ''}
+${patterns.winRate < 0.4 ? 'Past similar trades were below average — use extra caution' : ''}`
 	}
 
 	let wisdomSection = ''
@@ -306,28 +308,38 @@ ${patterns.winRate < 0.4 ? '⚠️ Past similar trades were below average — us
 		}
 	}
 
+	let logicSection = ''
+	if (logicRules) {
+		const skipConds = (logicRules.skipConditions || []).slice(0, 3)
+		if (skipConds.length > 0) {
+			logicSection = `\n[Logic Self-Learned Rules for ${symbol}]\n${skipConds.map(c => `  AUTO-SKIP: ${c.reason}`).join('\n')}`
+		}
+	}
+
+	const now = new Date()
+	const utcHour = now.getUTCHours()
+	const closeTimeNote = utcHour >= 13 ? `\nMarket close in ${16 - utcHour}h — consider overnight hold carefully` : ''
+
 	return `You are a FOREX signal filter. The indicator detected a signal below.
-Default to PROCEED. SKIP only when past data clearly shows <30% win rate with 5+ similar trades.
-If unsure or data is limited → PROCEED.
+Default to PROCEED. SKIP only when past data clearly shows <30% win rate with 5+ similar trades.${closeTimeNote}
 
 Signal: ${action} on ${symbol}
 Setup: ${setup} | Confidence: ${(confidence * 100).toFixed(0)}%
 Price: ${currentPrice} | RSI(14): ${rsi?.toFixed(2)}
 Price vs EMA20: ${pricePos} | EMA Trend: ${emaTrend}
 MACD Histogram: ${macdHist.toFixed(5)} (${macdHistTrend})
-ATR: ${atr?.toFixed(5)}${learningSection}${wisdomSection}${learnedSection}
+ATR: ${atr?.toFixed(5)}${learningSection}${wisdomSection}${learnedSection}${logicSection}
 
-Current SL: ${slPips}pips | TP: ${tpPips}pips (default values from indicator)
+Current SL: ${slPips}pips | TP: ${tpPips}pips
 
-Also suggest SL/TP adjustments based on past trade outcomes:
-- "tight" (0.7x): reduce SL/TP distance when market is choppy or SL gets hit too often
-- "normal" (1.0x): keep default
-- "wide" (1.3x): widen SL/TP when trend is strong or TP consistently missed
-
-Past trade analysis should guide your choice: if similar trades often hit SL first, use "wide" SL; if they hit TP first, try "tight" TP.
+Also suggest:
+1. SL/TP adjustments: "tight" (0.7x), "normal" (1.0x), "wide" (1.3x)
+2. Overnight hold: should this trade be held past market close (16:00 UTC)?
+   - true: only if strong trend, high conviction, past overnight trades were profitable
+   - false: close before close to avoid overnight fees + gap risk
 
 Respond ONLY valid JSON (no markdown):
-{"action":"PROCEED"|"SKIP","confidence":0-1,"slAdjustment":"normal","tpAdjustment":"normal","reason":"brief reason"}`
+{"action":"PROCEED"|"SKIP","confidence":0-1,"slAdjustment":"normal","tpAdjustment":"normal","holdOvernight":true|false,"reason":"brief reason"}`
 }
 
 const ADJUSTMENT_MAP = { tight: 0.7, normal: 1.0, wide: 1.3 }
@@ -343,10 +355,10 @@ async function getAIFilter(params) {
 	const hasSlot = await waitForAISlot()
 	if (!hasSlot) {
 		console.warn(`[AI] ${params.symbol} rate limit timeout — default PROCEED`)
-		return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, reason: 'Rate limit timeout — auto PROCEED' }
+		return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, holdOvernight: true, reason: 'Rate limit timeout — auto PROCEED' }
 	}
 
-	const { symbol, indicatorDecision, marketData, slPips, tpPips } = params
+	const { symbol, indicatorDecision, marketData, slPips, tpPips, logicRules } = params
 	const { action, setup, confidence } = indicatorDecision
 	const rsi = marketData?.rsi
 	const macdHistTrend = marketData?.macd?.histogramTrend
@@ -361,10 +373,10 @@ async function getAIFilter(params) {
 	// Auto-SKIP if past similar trades have low win rate
 	if (patterns && patterns.total >= 3 && patterns.winRate < 0.35) {
 		console.log(`[AI] ${symbol} auto-SKIP: past ${patterns.total} similar trades, WR ${(patterns.winRate * 100).toFixed(0)}%`)
-		return { action: 'SKIP', confidence: 0.4, slMultiplier: 1.0, tpMultiplier: 1.0, reason: `Auto-skip: past ${patterns.total} similar trades had ${(patterns.winRate * 100).toFixed(0)}% win rate` }
+		return { action: 'SKIP', confidence: 0.4, slMultiplier: 1.0, tpMultiplier: 1.0, holdOvernight: true, reason: `Auto-skip: past ${patterns.total} similar trades had ${(patterns.winRate * 100).toFixed(0)}% win rate` }
 	}
 
-	const prompt = buildFilterPrompt({ symbol, ...indicatorDecision, marketData, patterns, wisdom: getWisdomForPrompt(symbol, setup), slPips, tpPips })
+	const prompt = buildFilterPrompt({ symbol, ...indicatorDecision, marketData, patterns, wisdom: getWisdomForPrompt(symbol, setup), slPips, tpPips, logicRules })
 
 	let lastError = null
 	for (let retry = 0; retry < 3; retry++) {
@@ -379,6 +391,7 @@ async function getAIFilter(params) {
 				confidence: parsed.confidence ?? 0.5,
 				slMultiplier: parseAdjustment(parsed.slAdjustment),
 				tpMultiplier: parseAdjustment(parsed.tpAdjustment),
+				holdOvernight: parsed.holdOvernight !== false,
 				reason: parsed.reason ?? '',
 			}
 		} catch (err) {
@@ -397,27 +410,73 @@ async function getAIFilter(params) {
 	}
 
 	console.error('[AI] filter error:', lastError?.message || 'unknown')
-	return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
+	return { action: 'PROCEED', confidence: 0.5, slMultiplier: 1.0, tpMultiplier: 1.0, holdOvernight: true, reason: `AI error — default PROCEED (${(lastError?.message || '').slice(0, 80)})` }
 }
 
-export async function getBatchSkipPrediction(signals) {
+export async function getBatchSkipPrediction(signals, predictOnly = false) {
 	if (!signals || signals.length === 0) return []
+
+	// Try to reuse cached predictions from in-memory map
+	const cachedResults = []
+	const uncached = signals.filter(s => {
+		if (_predictionCache.has(s.cacheKey)) {
+			cachedResults.push(_predictionCache.get(s.cacheKey))
+			return false
+		}
+		return true
+	})
+
+	if (uncached.length === 0) {
+		console.log(`[AI Skip] All ${signals.length} signals reused from cache`)
+		return cachedResults.map(c => ({ index: c.index, decision: c.decision, confidence: c.confidence }))
+	}
+
+	// Query past skill for each uncached signal
+	const skillLines = []
+	for (const s of uncached) {
+		const skill = querySimilar(s.rsi, s.emaTrend, s.h4Trend)
+		if (skill && skill.total >= 3) {
+			skillLines.push(
+				`Skill for #${s.index} (${s.symbol} ${s.action} ${s.setup}): ${skill.total} past preds, AI skip=${skill.aiSkipped}, skipAcc=${skill.skipAccuracy != null ? (skill.skipAccuracy*100).toFixed(0)+'%' : '?'}, proceedAcc=${skill.proceedAccuracy != null ? (skill.proceedAccuracy*100).toFixed(0)+'%' : '?'}`
+			)
+		}
+	}
+
+	// Build prompt
+	const lines = uncached.map(s =>
+		`Signal#${s.index} ${s.action} ${s.symbol} ${s.setup} Price=${s.price} RSI=${s.rsi != null ? s.rsi.toFixed(1) : '?'} Trend=${s.emaTrend} H4=${s.h4Trend} S/R_ATR=${s.srAtrRatio != null ? s.srAtrRatio.toFixed(2) : '?'}`
+	).join('\n')
+
+	// Get overall skill summary for context
+	const skillSummary = getSkillSummary()
+	const skillContext = skillSummary
+		? `[Training Data] ${skillSummary.total} past predictions, AI accuracy ${skillSummary.accuracy}%, skip precision ${skillSummary.skipPrecision}%, net benefit $${skillSummary.netBenefit}`
+		: '[Training Data] No past predictions yet'
+
+	const skillSection = skillLines.length > 0
+		? `\nPast AI predictions for similar signals:\n${skillLines.join('\n')}`
+		: ''
+
+	const prompt = `You are a forex signal filter. Your job is to SKIP signals that will likely LOSE.
+
+Rules:
+- Default to PROCEED. Only SKIP when you are highly confident (>80%) the signal will lose.
+- If unsure, mixed signals, or limited data → PROCEED.
+- Use past AI prediction history to guide you: if past similar signals were mostly LOSSES when AI said SKIP, trust that pattern.
+- If past similar signals were mostly WINS when AI said PROCEED, trust that too.
+
+${skillContext}${skillSection}
+
+Signals:
+${lines}
+
+Respond JSON array only (no markdown):
+[{index:0,decision:"PROCEED",confidence:0.9},{index:1,decision:"SKIP",confidence:0.7},...]`
 
 	const hasSlot = await waitForAISlot()
 	if (!hasSlot) {
 		return signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
 	}
-
-	const lines = signals.map(s =>
-		`Signal#${s.index} ${s.action} ${s.symbol} ${s.setup} Price=${s.price} RSI=${s.rsi != null ? s.rsi.toFixed(1) : '?'} Trend=${s.emaTrend} H4=${s.h4Trend} S/R_ATR=${s.srAtrRatio != null ? s.srAtrRatio.toFixed(2) : '?'} PastWR=${s.pastSimilarWinRate != null ? (s.pastSimilarWinRate * 100).toFixed(0) + '%' : '?'}`
-	).join('\n')
-
-	const prompt = `Analyze these forex signals. Which will likely LOSE? Respond "SKIP" if expected to lose, "PROCEED" otherwise. Be aggressive with SKIP only when confident of loss.
-
-${lines}
-
-Respond JSON array only (no markdown):
-[{index:0,decision:"PROCEED",confidence:0.9},{index:1,decision:"SKIP",confidence:0.7},...]`
 
 	try {
 		const result = await model.generateContent(prompt)
@@ -425,11 +484,35 @@ Respond JSON array only (no markdown):
 		const text = result.response.text()
 		const cleaned = text.replace(/```json|```/g, '').trim()
 		const parsed = JSON.parse(cleaned)
-		return Array.isArray(parsed) ? parsed : signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
+		const predictions = Array.isArray(parsed) ? parsed : signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
+
+		// Cache predictions + persist to skill file (unless predictOnly mode)
+		for (const p of predictions) {
+			const signal = signals.find(s => s.index === p.index)
+			if (signal) {
+				const entry = { index: p.index, decision: p.decision, confidence: p.confidence, symbol: signal.symbol, action: signal.action, setup: signal.setup, rsi: signal.rsi, emaTrend: signal.emaTrend, h4Trend: signal.h4Trend, srAtrRatio: signal.srAtrRatio }
+				if (signal.cacheKey) _predictionCache.set(signal.cacheKey, entry)
+				if (!predictOnly) {
+					recordPrediction({
+						symbol: signal.symbol, action: signal.action, setup: signal.setup,
+						entryPrice: signal.price,
+						rsi: signal.rsi, emaTrend: signal.emaTrend, h4Trend: signal.h4Trend,
+						srAtrRatio: signal.srAtrRatio,
+						aiDecision: p.decision, aiConfidence: p.confidence,
+						actualResult: null, pnl: null,
+					})
+				}
+			}
+		}
+
+		// Return only requested signals (uncached + cached)
+		return [...predictions, ...cachedResults]
 	} catch (err) {
 		console.error('[AI] batch skip error:', err.message)
 		return signals.map(s => ({ index: s.index, decision: 'PROCEED', confidence: 0 }))
 	}
 }
+
+export function clearPredictionCache() { _predictionCache.clear() }
 
 export { getAIDecision, getAIConditionalOrders, getAIFilter, waitForAISlot }

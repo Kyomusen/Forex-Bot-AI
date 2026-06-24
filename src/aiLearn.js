@@ -168,6 +168,33 @@ Respond ONLY valid JSON (no markdown):
 		}
 	}
 
+	// Analyze overnight hold patterns
+	for (const [symbol, trades] of Object.entries(bySymbol)) {
+		const overnight = trades.filter(t => t.heldOvernight === true)
+		const dayOnly = trades.filter(t => t.heldOvernight !== true)
+		if (overnight.length < 3 || dayOnly.length < 3) continue
+
+		const overnightWr = overnight.filter(t => t.result === 'WIN').length / overnight.length
+		const dayWr = dayOnly.filter(t => t.result === 'WIN').length / dayOnly.length
+		const overnightPnl = overnight.reduce((s, t) => s + (t.pnl || 0), 0)
+		const dayPnl = dayOnly.reduce((s, t) => s + (t.pnl || 0), 0)
+
+		if (!existing[symbol]) existing[symbol] = {}
+		existing[symbol].overnight = {
+			overnightTrades: overnight.length,
+			dayTrades: dayOnly.length,
+			overnightWr: parseFloat((overnightWr * 100).toFixed(1)),
+			dayWr: parseFloat((dayWr * 100).toFixed(1)),
+			overnightPnl: parseFloat(overnightPnl.toFixed(2)),
+			dayPnl: parseFloat(dayPnl.toFixed(2)),
+			overnightAvgPnl: parseFloat((overnightPnl / overnight.length).toFixed(2)),
+			dayAvgPnl: parseFloat((dayPnl / dayOnly.length).toFixed(2)),
+			recommendHold: overnightWr > dayWr,
+		}
+		changed = true
+		console.log(`[AI Learn] ${symbol} overnight: ${overnight.length} trades (WR ${(overnightWr * 100).toFixed(0)}%) vs day ${dayOnly.length} trades (WR ${(dayWr * 100).toFixed(0)}%) — recommend ${existing[symbol].overnight.recommendHold ? 'HOLD' : 'CLOSE before close'}`)
+	}
+
 	if (changed) {
 		saveLearnedRules(existing)
 		console.log(`[AI Learn] Saved ${Object.keys(existing).length} AI learned rules`)

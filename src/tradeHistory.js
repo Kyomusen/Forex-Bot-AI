@@ -24,7 +24,7 @@ function saveHistory(history) {
 	fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2))
 }
 
-function addTrade({ dealId, symbol, action, confidence, trend_alignment, reason, entry, sl_pips, tp_pips, indicators }) {
+function addTrade({ dealId, symbol, action, confidence, trend_alignment, reason, entry, sl_pips, tp_pips, indicators, holdOvernight }) {
 	const history = loadHistory()
 	history.push({
 		dealId,
@@ -37,6 +37,7 @@ function addTrade({ dealId, symbol, action, confidence, trend_alignment, reason,
 		sl_pips,
 		tp_pips,
 		indicators,
+		holdOvernight: holdOvernight ?? true,
 		timestamp: new Date().toISOString(),
 	})
 	const trimmed = history.slice(-MAX_HISTORY)

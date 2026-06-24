@@ -14,7 +14,7 @@ function save(data) {
 	fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(data, null, 2))
 }
 
-export function recordTradeResult({ symbol, action, setup, entryIndicators, result, pnl, aiDecision, slPips, tpPips, exitReason }) {
+export function recordTradeResult({ symbol, action, setup, entryIndicators, result, pnl, aiDecision, slPips, tpPips, exitReason, holdOvernight, heldOvernight }) {
 	const data = load()
 	const ind = entryIndicators || {}
 	data.trades.push({
@@ -31,6 +31,8 @@ export function recordTradeResult({ symbol, action, setup, entryIndicators, resu
 		exitReason: exitReason ?? (result === 'WIN' ? 'TP' : result === 'LOSS' ? 'SL' : null),
 		result, pnl,
 		aiDecision: aiDecision || 'NONE',
+		holdOvernight: holdOvernight ?? true,
+		heldOvernight: heldOvernight ?? false,
 		closedAt: new Date().toISOString(),
 	})
 	if (data.trades.length > 500) data.trades.splice(0, data.trades.length - 500)

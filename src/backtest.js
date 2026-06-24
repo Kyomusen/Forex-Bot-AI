@@ -4,10 +4,12 @@ import { createSession, getCandles } from './capitalClient.js'
 import { getIndicators, getMultiTFIndicators } from './indicators.js'
 import { sendBacktestReport, sendBatchNotification } from './discordNotifier.js'
 import { recordTrades, shouldSkipSetup, printSummary } from './backtestLearning.js'
-import { waitForAISlot, recordAICall, getBatchSkipPrediction } from './aiDecision.js'
+import { waitForAISlot, recordAICall, getBatchSkipPrediction, clearPredictionCache } from './aiDecision.js'
+import { recordPrediction as recordSkipPrediction, updateResult as updateSkipResult } from './aiSkipSkill.js'
 import { recordTradeResult, querySimilarTrades } from './filterLearning.js'
 import { saveWisdom, getWisdomForPrompt } from './filterWisdom.js'
 import { aiLearnFromTrades, getLearnedRulesForPrompt, getSLTPAdjustment } from './aiLearn.js'
+import { queryLogicRules, analyzeTradePatterns } from './logicLearning.js'
 import { getGeminiModel } from './geminiClient.js'
 
 dotenv.config()
@@ -22,7 +24,10 @@ const SL_PIPS_DEFAULT = parseInt(process.env.BACKTEST_SL_PIPS ?? '15')
 const TP_PIPS_DEFAULT = parseInt(process.env.BACKTEST_TP_PIPS ?? '30')
 const TREND_TF = TF === 'HOUR' ? 'HOUR_4' : 'DAY'
 const CANDLE_OFFSET = parseInt(process.env.BACKTEST_OFFSET ?? '0')
-const AI_SKIP_RATE = parseFloat(process.env.BACKTEST_AI_SKIP_RATE ?? '0')
+const BACKTEST_TRAILING = process.env.BACKTEST_TRAILING === 'true'
+const TRAILING_ACTIVATE = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE ?? '1.0')
+const TRAILING_DISTANCE = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE ?? '0.5')
+const AI_SKIP_RATE = parseFloat(process.env.BACKTEST_AI_SKIP_RATE ?? '1.0')
 
 const CACHE_FILE = './logs/candle_cache.json'
 
@@ -386,7 +391,7 @@ async function runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, s
 			console.warn(`[AI] ⏰ rate limit timeout — สัญญาณที่เหลือทั้งหมด (${ruleSignals.length - batchIdx} signals) จะ PROCEED อัตโนมัติ`)
 			for (let j = batchIdx; j < ruleSignals.length; j++) {
 				const s = ruleSignals[j]
-				aiFiltered[s.symbol][s.candle] = 'PROCEED'
+				aiFiltered[s.symbol][s.candle] = { action: 'PROCEED', holdOvernight: true, slMultiplier: 1.0, tpMultiplier: 1.0 }
 			}
 			break
 		}
@@ -460,8 +465,10 @@ ${aiRulesContext}
 Signals:
 ${signalsText}
 
+Also decide if each signal should be held overnight (past market close). Set holdOvernight=false when the signal is weak, near market close, or past similar trades held overnight performed poorly.
+
 Respond ONLY valid JSON array (no markdown):
-[{"candle":0,"symbol":"EURUSD","action":"PROCEED","confidence":0.9,"reason":"..."}]`
+[{"candle":0,"symbol":"EURUSD","action":"PROCEED","confidence":0.9,"holdOvernight":true,"reason":"..."}]`
 
 		let retry429 = 0
 		let batchSuccess = false
@@ -476,8 +483,10 @@ Respond ONLY valid JSON array (no markdown):
 				if (Array.isArray(decisions)) {
 					for (const d of decisions) {
 						const candleIdx = parseInt(String(d.candle).replace(/^C/, ''), 10)
-						if (!isNaN(candleIdx) && d?.symbol && aiFiltered[d.symbol] && d.action === 'PROCEED') {
-							aiFiltered[d.symbol][candleIdx] = d.action
+						if (!isNaN(candleIdx) && d?.symbol && aiFiltered[d.symbol]) {
+							if (d.action === 'PROCEED') {
+								aiFiltered[d.symbol][candleIdx] = { action: 'PROCEED', holdOvernight: d.holdOvernight !== false, slMultiplier: 1.0, tpMultiplier: 1.0 }
+							}
 						}
 					}
 					const proceed = decisions.filter(d => d?.action === 'PROCEED').length
@@ -504,7 +513,7 @@ Respond ONLY valid JSON array (no markdown):
 				} else {
 					console.warn(`[AI] batch filter error (${err.message?.slice(0, 60)}) — fallback PROCEED`)
 					for (const s of batch) {
-						aiFiltered[s.symbol][s.candle] = 'PROCEED'
+						aiFiltered[s.symbol][s.candle] = { action: 'PROCEED', holdOvernight: true, slMultiplier: 1.0, tpMultiplier: 1.0 }
 					}
 					batchSuccess = true
 					batchIdx += BATCH_SIZE
@@ -583,7 +592,6 @@ async function runBacktest() {
 	const allSegmentTrades = {}
 	for (const sym of activeSymbols) allSegmentTrades[sym] = []
 	const signalLog = []
-	let autoSkipCount = 0
 	let cumProfit = 0
 	let segAiCalls = 0
 	let globalMaxDD = 0
@@ -607,6 +615,7 @@ async function runBacktest() {
 			positions[sym] = null
 			trades[sym] = []
 		}
+		clearPredictionCache()
 		let aiFilteredMap = {}
 		if (USE_AI) {
 			const result = await runAIBacktestFilter(activeSymbols, allData, minLen, h4IndCache, segStart, segEnd)
@@ -622,39 +631,63 @@ async function runBacktest() {
 			const pos = positions[sym]
 
 			if (pos) {
-				// === Trailing Stop ===
-				if (pos.atrValue > 0 && process.env.BACKTEST_TRAILING === 'true') {
-					const candleHigh = getHigh(h1[i])
-					const candleLow = getLow(h1[i])
-					const trailingActivate = parseFloat(process.env.BACKTEST_TRAILING_ACTIVATE || '1.0')
-					const trailingDist = parseFloat(process.env.BACKTEST_TRAILING_DISTANCE || '0.5')
-					if (pos.type === 'BUY') {
-						if (candleHigh > pos.bestPrice) pos.bestPrice = candleHigh
-						const profit = pos.bestPrice - pos.entry
-						if (profit >= trailingActivate * pos.atrValue) {
-							const newSl = Math.max(pos.sl, pos.bestPrice - trailingDist * pos.atrValue)
-							if (newSl > pos.sl) {
-								pos.sl = newSl
-								if (!pos.trailingActivated) {
-									pos.trailingActivated = true
-									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
-								}
-							}
-						}
-					} else {
-						if (candleLow < pos.bestPrice) pos.bestPrice = candleLow
-						const profit = pos.entry - pos.bestPrice
-						if (profit >= trailingActivate * pos.atrValue) {
-							const newSl = Math.min(pos.sl, pos.bestPrice + trailingDist * pos.atrValue)
-							if (newSl < pos.sl) {
-								pos.sl = newSl
-								if (!pos.trailingActivated) {
-									pos.trailingActivated = true
-									console.log(`  [Trailing] ${sym} activated, SL=${newSl.toFixed(5)}`)
-								}
-							}
+				// Trailing stop logic (applies to all positions if enabled)
+				if (BACKTEST_TRAILING) {
+					const currentBest = pos.type === 'BUY'
+						? Math.max(pos.bestPrice, price)
+						: Math.min(pos.bestPrice, price)
+					const pnlPct = pos.atrValue > 0
+						? Math.abs(price - pos.entry) / pos.atrValue
+						: 0
+					if (pnlPct >= TRAILING_ACTIVATE && !pos.trailingActivated) {
+						pos.trailingActivated = true
+					}
+					if (pos.trailingActivated) {
+						const newSl = pos.type === 'BUY'
+							? Math.max(pos.sl, currentBest - TRAILING_DISTANCE * pos.atrValue)
+							: Math.min(pos.sl, currentBest + TRAILING_DISTANCE * pos.atrValue)
+						if (newSl !== pos.sl) {
+							pos.sl = newSl
+							pos.bestPrice = currentBest
 						}
 					}
+				}
+				// Overnight hold close: if AI said holdOvernight=false and position age >= 6h, close at market
+				if (pos.holdOvernight === false && (i - pos.entryIdx) >= 6) {
+					const closePrice = price
+					const multiplier = pos.type === 'BUY' ? 1 : -1
+					const pnlPips2 = (closePrice - pos.entry) / pipToPrice(1, sym)
+					const pnl2 = pnlPips2 * pos.size * pipValuePerLot(sym) * multiplier
+					const slPips = Math.round(Math.abs(pos.sl - pos.entry) / pipToPrice(1, sym))
+					const tpPips = Math.round(Math.abs(pos.tp - pos.entry) / pipToPrice(1, sym))
+					balances[sym] += pnl2
+					trades[sym].push({
+						symbol: sym, type: pos.type, setup: pos.setup, entry: pos.entry,
+						exit: closePrice, pnl: parseFloat(pnl2.toFixed(2)), result: pnl2 >= 0 ? 'WIN' : 'LOSS',
+						exitTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
+						entryTime: pos.entryTime, bars: i - pos.entryIdx,
+						reason: pos.reason, confidence: pos.confidence,
+						slPips, tpPips, exitReason: 'CLOSE',
+					})
+					recordTradeResult({
+						symbol: sym, action: pos.type, setup: pos.setup,
+						entryIndicators: pos.entryIndicators,
+						result: pnl2 >= 0 ? 'WIN' : 'LOSS',
+						pnl: parseFloat(pnl2.toFixed(2)),
+						aiDecision: USE_AI ? 'PROCEED' : 'NONE',
+						slPips, tpPips, exitReason: 'CLOSE',
+						holdOvernight: false, heldOvernight: false,
+					})
+					if (AI_SKIP_RATE > 0 && pos.signalIndex != null && signalLog[pos.signalIndex]) {
+						signalLog[pos.signalIndex].tradeResult = pnl2 >= 0 ? 'WIN' : 'LOSS'
+						signalLog[pos.signalIndex].pnl = parseFloat(pnl2.toFixed(2))
+					}
+					positions[sym] = null
+					const ct = Object.values(balances).reduce((a, b) => a + b, 0)
+					if (ct > peakTotal) peakTotal = ct
+					const dd2 = ((peakTotal - ct) / peakTotal) * 100
+					if (dd2 > maxDD) maxDD = dd2
+					continue
 				}
 				const result = checkPosition(pos, h1, pos.entryIdx + 1, i + 1)
 				if (result) {
@@ -680,10 +713,18 @@ async function runBacktest() {
 						pnl: parseFloat(pnl.toFixed(2)),
 						aiDecision: USE_AI ? 'PROCEED' : 'NONE',
 						slPips, tpPips, exitReason: result.type,
+						holdOvernight: pos.holdOvernight ?? true,
+						heldOvernight: false,
 					})
 					if (AI_SKIP_RATE > 0 && pos.signalIndex != null && signalLog[pos.signalIndex]) {
 						signalLog[pos.signalIndex].tradeResult = pnl >= 0 ? 'WIN' : 'LOSS'
 						signalLog[pos.signalIndex].pnl = parseFloat(pnl.toFixed(2))
+						updateSkipResult({
+							symbol: sym, action: pos.type, setup: pos.setup,
+							entryPrice: pos.entry,
+							actualResult: pnl >= 0 ? 'WIN' : 'LOSS',
+							pnl: parseFloat(pnl.toFixed(2)),
+						})
 					}
 					positions[sym] = null
 					const currentTotal = Object.values(balances).reduce((a, b) => a + b, 0)
@@ -716,9 +757,13 @@ async function runBacktest() {
 			const ruleDecision = evaluate({ symbol: sym, h4Trend, ind: mainInd, knowledge: true })
 			if (!ruleDecision || ruleDecision.action === 'HOLD') continue
 
+			// Logic self-learned pre-filter (no API cost)
+			const logicCheck = queryLogicRules(sym, { setup: ruleDecision.setup, rsi: mainInd?.rsi })
+			if (logicCheck.action === 'SKIP') continue
+
 			if (USE_AI) {
 				const filterAction = aiFilteredMap[sym]?.[i]
-				if (filterAction !== 'PROCEED') continue
+				if (!filterAction || filterAction.action !== 'PROCEED') continue
 			}
 
 			const finalAction = ruleDecision.action
@@ -726,43 +771,28 @@ async function runBacktest() {
 			const entryReason = ruleDecision.reason
 			const entryConf = ruleDecision.confidence
 
-			// Signal logging + Auto-SKIP for AI skip analysis
+			// Record signal for AI skip analysis (no Auto-SKIP — AI decides)
 			const signalEntry = {
 				index: signalLog.length,
 				symbol: sym, action: finalAction, setup: setupName,
 				price, rsi: mainInd?.rsi, emaTrend: mainInd?.emaTrend, h4Trend,
-				pastSimilarWinRate: null,
 				tradeResult: null, pnl: null,
-				autoSkipped: false,
-			}
-			if (AI_SKIP_RATE > 0) {
-				const patterns = querySimilarTrades({
-					symbol: sym, setup: setupName,
-					rsi: mainInd?.rsi ?? 50,
-					macdHistogramTrend: mainInd?.macd?.histogramTrend ?? 'neutral',
-				})
-				signalEntry.pastSimilarWinRate = patterns?.winRate ?? null
-				if (patterns && patterns.total >= 3 && patterns.winRate < 0.35) {
-					signalEntry.autoSkipped = true
-					signalEntry.tradeResult = 'AUTO_SKIP'
-					signalLog.push(signalEntry)
-					autoSkipCount++
-					console.log(`[Auto-SKIP] ${sym} ${finalAction} past ${patterns.total} similar WR ${(patterns.winRate*100).toFixed(0)}%`)
-					continue
-				}
 			}
 			signalLog.push(signalEntry)
 
 			const atrVal = mainInd?.atr ?? 0
 			let { slPips, tpPips } = atrParams(atrVal, sym)
-			// Apply learned SL/TP adjustments (from AI learning)
-			const adj = getSLTPAdjustment(sym)
-			if (adj.slMultiplier !== 1.0 || adj.tpMultiplier !== 1.0) {
+			// Apply combined SL/TP adjustments: AI learned + logic learned
+			const aiAdj = getSLTPAdjustment(sym)
+			const logicAdj = logicCheck.slMultiplier ? { slMultiplier: logicCheck.slMultiplier, tpMultiplier: logicCheck.tpMultiplier } : { slMultiplier: 1.0, tpMultiplier: 1.0 }
+			const finalSlM = parseFloat(((aiAdj.slMultiplier ?? 1.0) * (logicAdj.slMultiplier ?? 1.0)).toFixed(2))
+			const finalTpM = parseFloat(((aiAdj.tpMultiplier ?? 1.0) * (logicAdj.tpMultiplier ?? 1.0)).toFixed(2))
+			if (finalSlM !== 1.0 || finalTpM !== 1.0) {
 				const oldSl = slPips; const oldTp = tpPips
-				slPips = Math.max(5, Math.round(slPips * adj.slMultiplier))
-				tpPips = Math.max(10, Math.round(tpPips * adj.tpMultiplier))
+				slPips = Math.max(5, Math.round(slPips * finalSlM))
+				tpPips = Math.max(10, Math.round(tpPips * finalTpM))
 				if (oldSl !== slPips || oldTp !== tpPips) {
-					console.log(`[Learn] ${sym} SL:${oldSl}→${slPips} TP:${oldTp}→${tpPips}`)
+					console.log(`[Adjust] ${sym} SL:${oldSl}→${slPips} TP:${oldTp}→${tpPips} (AI ${aiAdj.slMultiplier ?? 1.0}x logic ${logicAdj.slMultiplier ?? 1.0}x)`)
 				}
 			}
 			const entryPrice = price
@@ -771,6 +801,7 @@ async function runBacktest() {
 			const size = calcSize(balances[sym], slPips, sym)
 			if (!size) continue
 
+			const holdOvernight = USE_AI ? (aiFilteredMap[sym]?.[i]?.holdOvernight ?? true) : true
 			positions[sym] = {
 				type: finalAction, entry: entryPrice, sl: slPrice, tp: tpPrice,
 				size, entryIdx: i, entryTime: current.snapshotTime ?? current.snapshotTimeUTC ?? i,
@@ -779,6 +810,7 @@ async function runBacktest() {
 				bestPrice: entryPrice,
 				trailingActivated: false,
 				signalIndex: signalEntry.index,
+				holdOvernight,
 			entryIndicators: mainInd ? {
 				rsi: mainInd.rsi,
 				ema20: mainInd.ema20,
@@ -801,7 +833,10 @@ async function runBacktest() {
 		recordTrades(segAllTrades)
 
 		saveWisdom()
-		if (USE_AI || process.env.BACKTEST_LEARN === 'true') await aiLearnFromTrades()
+		if (USE_AI || process.env.BACKTEST_LEARN === 'true') {
+			await aiLearnFromTrades()
+			analyzeTradePatterns()
+		}
 
 		const segFinal = Object.values(balances).reduce((a, b) => a + b, 0)
 		const segPnl = segFinal - BALANCE_PER_SYMBOL * activeSymbols.length
@@ -811,17 +846,20 @@ async function runBacktest() {
 		console.log(`➡️  Segment ${seg + 1}: $${segPnl >= 0 ? '+' : ''}${segPnl.toFixed(2)} | ${segClosed.length} trades | WR: ${segClosed.length > 0 ? (segClosed.filter(t => t.result === 'WIN').length / segClosed.length * 100).toFixed(1) : 'N/A'}%`)
 	} // end segment loop
 
-	// === Post-hoc AI skip analysis ===
+	// === Post-hoc AI skip analysis (all signals, rate=1.0) ===
 	const aiSkipResults = []
 	if (AI_SKIP_RATE > 0) {
 		const tradedSignals = signalLog.filter(s => s.tradeResult === 'WIN' || s.tradeResult === 'LOSS')
-		const sampled = tradedSignals.filter(() => Math.random() < AI_SKIP_RATE)
-		if (sampled.length > 0) {
-			console.log(`\n[AI Skip] Sending ${sampled.length}/${tradedSignals.length} signals to AI (rate=${AI_SKIP_RATE})...`)
+		if (tradedSignals.length > 0) {
+			const withCacheKeys = tradedSignals.map(s => ({
+				...s,
+				cacheKey: `${s.symbol}:${s.action}:${s.setup}:${s.rsi != null ? s.rsi.toFixed(0) : '?'}:${s.emaTrend || '?'}`,
+			}))
+			console.log(`\n[AI Skip] Analyzing ${withCacheKeys.length} signals (rate=1.0)...`)
 			try {
-				const predictions = await getBatchSkipPrediction(sampled)
+				const predictions = await getBatchSkipPrediction(withCacheKeys, false)
 				for (const p of predictions) {
-					const signal = sampled.find(s => s.index === p.index)
+					const signal = withCacheKeys.find(s => s.index === p.index)
 					if (!signal) continue
 					aiSkipResults.push({
 						...signal,
@@ -848,9 +886,8 @@ async function runBacktest() {
 			const skippedWinPnl = aiSkipped.filter(r => r.tradeResult === 'WIN').reduce((s, r) => s + (r.pnl || 0), 0)
 
 			console.log(`\n${'='.repeat(60)}`)
-			console.log(`📊 AI Skip Analysis (sampled ${aiSkipResults.length}/${tradedSignals.length} signals)`)
+			console.log(`📊 AI Skip Analysis (${aiSkipResults.length} signals)`)
 			console.log(`${'='.repeat(60)}`)
-			console.log(`Auto-SKIP (past WR<35%): ${autoSkipCount} trades skipped`)
 			console.log(`AI Accuracy: ${aiAccuracy.toFixed(1)}% (${aiSkipResults.filter(r => r.aiCorrect).length}/${aiSkipResults.length})`)
 			console.log(`\nAI said SKIP: ${aiSkipped.length} times`)
 			console.log(`  ✓ Correct (was LOSS): ${correctSkip} (${correctSkip > 0 ? (correctSkip/aiSkipped.length*100).toFixed(1) : 0}%)`)

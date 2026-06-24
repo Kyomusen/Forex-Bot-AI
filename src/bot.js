@@ -1,7 +1,8 @@
 import cron from 'node-cron'
 import dotenv from 'dotenv'
-import { createSession, getCandles, getOpenPositions, updatePosition, toEpic } from './capitalClient.js'
+import { createSession, getCandles, getOpenPositions, closePosition, updatePosition, toEpic } from './capitalClient.js'
 import { getMultiTFIndicators } from './indicators.js'
+import { getAIFilter } from './aiDecision.js'
 import { checkNews } from './newsFilter.js'
 import { buildOrderParams } from './riskManager.js'
 import { placeOrder, hasOpenPosition } from './orderManager.js'
@@ -10,6 +11,8 @@ import { sendOrderNotification, sendErrorNotification, sendCycleSummary } from '
 import { getCached, INITIAL_FETCH, REFRESH_FETCH } from './candleCache.js'
 import { evaluate as strategyEval, SYMBOL_STRATEGY } from './strategy.js'
 import { loadPending, savePending, placePendingOrder, syncWithCapital, cleanExpired, executePendingOrders } from './pendingOrders.js'
+import { recordTradeResult } from './filterLearning.js'
+import { queryLogicRules, analyzeTradePatterns } from './logicLearning.js'
 
 dotenv.config()
 
@@ -211,11 +214,35 @@ async function runAllCycles() {
 		}
 	}
 
-	// Phase 2: Trailing stop check for open positions
+	// Phase 2: Overnight close check (close positions that shouldn't be held overnight)
+	const utcHour = new Date().getUTCHours()
+	if (utcHour >= 14 && utcHour <= 16) {
+		console.log('[Bot] Phase 2: ตรวจสอบ Overnight Hold...')
+		try {
+			const positions = await getOpenPositions()
+			if (positions && positions.length > 0) {
+				const hist = loadHistory()
+				for (const pos of positions) {
+					const dealId = pos.position?.dealId
+					if (!dealId) continue
+					const trade = hist.find(t => t.dealId === dealId)
+					const shouldHold = trade?.holdOvernight !== false
+					if (!shouldHold) {
+						console.log(`[Bot] ${pos.market?.epic ?? '?'} ปิด position (holdOvernight=false) dealId=${dealId}`)
+						await closePosition(dealId)
+					}
+				}
+			}
+		} catch (err) {
+			console.error('[Bot] Overnight close error:', err.message)
+		}
+	}
+
+	// Phase 3: Trailing stop check for open positions
 	await checkTrailingStops()
 
-	// Phase 3: Indicator → AI filter → News → Place order
-	console.log('[Bot] Phase 3: วิเคราะห์ Indicator...')
+	// Phase 4: Logic pre-filter → AI filter → News → Place order
+	console.log('[Bot] Phase 4: วิเคราะห์ Indicator...')
 	const results = []
 
 	for (const symbol of SYMBOLS) {
@@ -287,7 +314,51 @@ async function runAllCycles() {
 			continue
 		}
 
-		// Step 2: News filter
+		// Step 2: Logic self-learned pre-filter (no API cost)
+		const logicCheck = queryLogicRules(symbol, { setup, rsi: mainInd?.rsi, macdHistogramTrend: mainInd?.macd?.histogramTrend })
+		if (logicCheck.action === 'SKIP') {
+			console.log(`[Bot] ${symbol} Logic filter: SKIP — ${logicCheck.reason}`)
+			results.push({ symbol, action, status: 'SKIP', reason: `Logic skip: ${(logicCheck.reason || '').slice(0, 200)}` })
+			continue
+		}
+		if (logicCheck.rsiOverride && logicCheck.rsiOverride.min != null) {
+			const indRsi = mainInd?.rsi
+			if (indRsi != null && (indRsi < logicCheck.rsiOverride.min || indRsi > logicCheck.rsiOverride.max)) {
+				console.log(`[Bot] ${symbol} Logic RSI override: SKIP (RSI ${indRsi.toFixed(1)} outside ${logicCheck.rsiOverride.min}-${logicCheck.rsiOverride.max})`)
+				results.push({ symbol, action, status: 'SKIP', reason: `Logic RSI override: ${indRsi.toFixed(1)} outside ${logicCheck.rsiOverride.min}-${logicCheck.rsiOverride.max}` })
+				continue
+			}
+		}
+
+		// Apply logic-adjusted confidence
+		const adjustedConfidence = logicCheck.confidenceOverride ?? confidence
+
+		// Step 3: AI filter (PROCEED/SKIP + SL/TP adj + holdOvernight)
+		const aiResult = await getAIFilter({
+			symbol, indicatorDecision, marketData: mainInd,
+			slPips: baseSlPips, tpPips: baseTpPips,
+			logicRules: logicCheck.confidenceOverride ? logicCheck : null,
+		})
+		if (aiResult.action === 'SKIP') {
+			console.log(`[Bot] ${symbol} AI filter: SKIP — ${aiResult.reason}`)
+			results.push({ symbol, action, status: 'SKIP', reason: `AI skip: ${(aiResult.reason || '').slice(0, 200)}` })
+			continue
+		}
+		console.log(`[Bot] ${symbol} AI filter: PROCEED (conf ${(aiResult.confidence * 100).toFixed(0)}%)`)
+
+		// Apply AI SL/TP + logic SL/TP adjustments
+		const aiSlM = aiResult.slMultiplier ?? 1.0
+		const aiTpM = aiResult.tpMultiplier ?? 1.0
+		const logicSlM = logicCheck.slMultiplier ?? 1.0
+		const logicTpM = logicCheck.tpMultiplier ?? 1.0
+		const finalSlM = parseFloat((aiSlM * logicSlM).toFixed(2))
+		const finalTpM = parseFloat((aiTpM * logicTpM).toFixed(2))
+		const slPips = Math.max(5, Math.round(baseSlPips * finalSlM))
+		const tpPips = Math.max(10, Math.round(baseTpPips * finalTpM))
+		const holdOvernight = aiResult.holdOvernight !== false
+		console.log(`[Bot] ${symbol} SL:${baseSlPips}→${slPips}pips (${finalSlM}x) TP:${baseTpPips}→${tpPips}pips (${finalTpM}x) holdOvernight:${holdOvernight}`)
+
+		// Step 4: News filter
 		const newsResult = await checkNews(symbol)
 		if (newsResult.hasMajorEvent) {
 			console.log(`[Bot] ${symbol} news: BLOCK — ${(newsResult.events || []).join(', ')}`)
@@ -295,13 +366,10 @@ async function runAllCycles() {
 			continue
 		}
 
-		const slPips = baseSlPips
-		const tpPips = baseTpPips
-
-		// Step 3: Place order
+		// Step 5: Place order
 		const currentPrice = mainInd.currentPrice
 		const orderParams = await buildOrderParams({
-			decision: { action, sl_pips: slPips, tp_pips: tpPips, confidence },
+			decision: { action, sl_pips: slPips, tp_pips: tpPips, confidence: adjustedConfidence },
 			indicators: { currentPrice },
 			accountBalance: ACCOUNT_BALANCE,
 			symbol,
@@ -325,12 +393,13 @@ async function runAllCycles() {
 				dealId: result.dealReference ?? null,
 				symbol,
 				action,
-				confidence,
-				reason: `Indicator: ${setup}`,
+				confidence: adjustedConfidence,
+				reason: `Indicator: ${setup} | AI: ${(aiResult.reason || '').slice(0, 100)}`,
 				entry: currentPrice,
 				sl_pips: slPips,
 				tp_pips: tpPips,
 				indicators: mainInd,
+				holdOvernight,
 				paper: PAPER_TRADING || undefined,
 			})
 			await sendOrderNotification({
@@ -340,8 +409,8 @@ async function runAllCycles() {
 				entry: currentPrice,
 				sl: orderParams.stopLevel,
 				tp: orderParams.profitLevel,
-				confidence,
-				reason: `Indicator: ${setup}`,
+				confidence: adjustedConfidence,
+				reason: `Indicator: ${setup} | AI: ${(aiResult.reason || '').slice(0, 100)}`,
 				trend_alignment: 'aligned',
 				paper: PAPER_TRADING,
 			})
@@ -350,6 +419,16 @@ async function runAllCycles() {
 	}
 
 	await sendCycleSummary(results, RUN_NUMBER)
+
+	// Run logic self-learning after each cycle
+	try {
+		const logicRules = analyzeTradePatterns()
+		if (logicRules) {
+			console.log(`[Logic] Updated rules for ${Object.keys(logicRules).length} symbols`)
+		}
+	} catch (err) {
+		console.error('[Logic] learning error:', err.message)
+	}
 }
 
 async function start() {

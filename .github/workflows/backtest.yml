@@ -32,9 +32,9 @@ on:
         required: true
         default: 'true'
       ai_skip_rate:
-        description: 'AI skip analysis sample rate (0=disabled, 0.3=30%)'
+        description: 'AI skip analysis rate (0=disabled, 1.0=100%)'
         required: true
-        default: '0'
+        default: '1.0'
       setups:
         description: 'Allowed setups (comma-separated)'
         required: true
@@ -141,7 +141,7 @@ jobs:
         run: |
           git config user.name "forex-bot"
           git config user.email "bot@forex.ai"
-          git add -f logs/filter_knowledge.json logs/filter_wisdom.md logs/ai_learned_rules.json 2>/dev/null || true
+          git add -f logs/filter_knowledge.json logs/filter_wisdom.md logs/ai_learned_rules.json logs/logic_learned_rules.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No knowledge changes to commit"
           else
